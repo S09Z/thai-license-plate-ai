@@ -28,7 +28,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 0 ✅ | API skeleton + health | `app/` | fastapi, pydantic | done, suite green |
 | 1 ✅ | Detection | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | done — `POST /detect` returns boxes; uploads validated; latency unmeasured (no trained weights yet) |
 | 2 ✅ | Perspective correction | `detector/pipelines/perspective.py` | (opencv) | done — box → deskewed crop; synthetic-warp tested; 0.32ms median |
-| 3 ✅ | OCR | `ocr/`, `app/api/ocr.py` | paddleocr, paddlepaddle | done — `POST /ocr` returns plate text + province candidates; **589ms vs <40ms budget (see Part D)** |
+| 3 ✅ | OCR | `ocr/`, `app/api/ocr.py` | paddleocr, paddlepaddle | done — `POST /ocr` returns plate text + province candidates; **394ms vs <40ms budget (see Part D)** |
 | **4** | **Post-processing** (next) | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
 | 5 | RAG validation | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
 | 6 | Full `/recognize` | `app/api/recognize.py` | — | chains 1→5, one JSON response; total <100ms budget checked |
@@ -176,17 +176,22 @@ executed, per the security rule in `CLAUDE.md`.
 |---|---|---|
 | `plate_text` | `กข 1234` @ 0.995 | `กข 1234` @ 1.000 |
 | province | `ชลบร 9` | `ชลบรดี` |
-| warm median | 915 ms | **468–589 ms** |
+| warm median | 915 ms | **394 ms** (n=15, `docs/benchmark/`) |
 | at 3× upscale | collapses to `VEZL` | still correct |
 
 - 14 unit tests for this slice, suite total **42 green**; ruff/black/mypy clean.
-- Cold start (first recognition, weights load): ~4.9 s.
+- Cold start (first recognition, weights load): ~4.7 s.
+- Reproducible: `poetry run python docs/benchmark/bench_ocr.py`; result recorded in
+  `docs/benchmark/ocr-phase3.md`. An earlier figure of 589 ms (n=5, measured under load) appears
+  in the Phase 3 commit message and PR body and is superseded by 394 ms (n=15).
 
 ### ⚠️ Open issues carried forward
-1. **Latency misses the budget by ~15×** — 589 ms measured against `<40 ms` in `CLAUDE.md`.
+1. **Latency misses the budget by ~10×** — 394 ms measured against `<40 ms` in `CLAUDE.md`.
+   The OCR stage alone exceeds the whole-pipeline `<100 ms` budget by ~4×.
    Untried levers: ONNX/OpenVINO export, quantization, batching, GPU, or skipping text
-   *detection* entirely (a rectified crop has known line positions). **The performance budget is
-   currently aspirational, not met.** Revisit in Phase 6 when the full pipeline is assembled.
+   *detection* entirely (a rectified crop has known line positions — likely the largest single
+   win). **The performance budget is currently aspirational, not met.** Revisit in Phase 6 when
+   the full pipeline is assembled.
 2. **Thai vowel/tone marks are dropped** — `ชลบุรี` read as `ชลบร`/`ชลบรดี`. The consonant
    skeleton survives, so Phase 5 fuzzy-matching against the 77-province list should recover it;
    this is the main reason province resolution is deferred rather than attempted here.
