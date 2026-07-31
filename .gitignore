@@ -65,6 +65,7 @@ chroma/
 # Local tool state (machine-specific, not shared)
 .tokensave/
 .claude/settings.local.json
+.claude/*.lock
 
 # OS / editor
 .DS_Store
