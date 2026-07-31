@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment / secrets
+# .env.example IS tracked; real .env files never are.
+.env
+.env.*
+!.env.example
+.envrc
+
+# Credentials & keys (preventive — nothing of the sort is in the repo today)
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+id_rsa*
+credentials.json
+client_secret*.json
+service-account*.json
+gcp-*.json
+secrets/
+.secrets/
+
+# Test & tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Model binaries (store release models externally, not in git)
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# Datasets (raw data is immutable and lives outside git)
+datasets/raw/
+datasets/processed/
+datasets/augmented/
+
+# Logs
+logs/*.log
+
+# Vector store
+*.chroma/
+chroma/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local tool state (machine-specific, not shared)
+.tokensave/
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
