@@ -26,8 +26,8 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | Phase | Stage | Key modules | New deps | Acceptance / budget |
 |------|-------|-------------|----------|---------------------|
 | 0 ✅ | API skeleton + health | `app/` | fastapi, pydantic | done, suite green |
-| **1** | **Detection** (next) | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | `POST /detect` returns boxes; uploads validated; <25ms/plate (GPU target) |
-| 2 | Perspective correction | `detector/pipelines/` or `app/services/` | (opencv) | box → deskewed plate crop; unit-tested on synthetic warp |
+| 1 ✅ | Detection | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | done — `POST /detect` returns boxes; uploads validated; latency unmeasured (no trained weights yet) |
+| **2** | **Perspective correction** (next) | `detector/pipelines/` or `app/services/` | (opencv) | box → deskewed plate crop; unit-tested on synthetic warp |
 | 3 | OCR | `ocr/`, `app/api/` | paddleocr | crop → raw text + province candidates; <40ms |
 | 4 | Post-processing | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
 | 5 | RAG validation | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
@@ -40,7 +40,17 @@ latency benchmark under `docs/benchmark/`. Deferred until Phase 3+ to avoid spec
 
 ---
 
-## Part B — Detection Slice (code-ready)
+## Part B — Detection Slice (✅ shipped 2026-07-31)
+
+Built test-first. Deviations from the plan as written, all deliberate:
+- **No `detector/pipelines/__init__.py` or `detector/models/__init__.py`** — they would be empty
+  packages with no members yet (Simplicity First). Add them when Phase 2 needs them.
+- **Added a `503` mapping** for missing detector weights (`FileNotFoundError`). Not in the original
+  plan, but it is the state the app is in today, and 500 would have been wrong.
+- **Optional integration test skipped** — there are no weights to point it at yet.
+- `_load_yolo()` is a module-level function so tests patch it instead of touching private state;
+  this is what keeps the suite weight-free.
+
 
 **Goal:** `POST /detect` accepts an image upload, validates it, runs YOLO plate detection, and
 returns bounding boxes as JSON. Model weights are **configurable** and inference is **mockable** so
