@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Thai License Plate Recognition</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <h1>Thai License Plate Recognition</h1>
+    <p class="lede">
+      Upload a photo to detect plates, read the number and resolve the province.
+    </p>
+
+    <form id="upload-form">
+      <input type="file" id="file-input" accept="image/png, image/jpeg" required>
+      <button type="submit" id="submit-button">Recognize</button>
+    </form>
+
+    <p id="status" class="status" hidden></p>
+
+    <div id="preview-panel" hidden>
+      <canvas id="preview"></canvas>
+    </div>
+
+    <table id="results" hidden>
+      <thead>
+        <tr>
+          <th><span class="visually-hidden">Box</span></th>
+          <th>Plate number</th>
+          <th>Confidence</th>
+          <th>Province</th>
+          <th>Confidence</th>
+          <th>Province read as</th>
+        </tr>
+      </thead>
+      <tbody id="results-body"></tbody>
+    </table>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
