@@ -473,10 +473,40 @@ behaviour was checked in a real browser instead:
 | `.txt` renamed `.png` | ✅ caught **twice**: the client's preview rejects it before upload, and submitting anyway returns `400 "Payload does not decode to an image"`, surfaced verbatim |
 | `/health`, `/docs`, `/openapi.json` | ✅ unshadowed by the `/static` mount; `GET /` absent from the schema |
 
+### Addendum — live camera capture (same PR, same branch)
+
+Extends the same page with a "Start camera" / "Stop" panel: `getUserMedia` shows the laptop's
+camera live, and every 1.5s a frame is captured to an in-memory canvas and sent through the exact
+same `recognize()` → `drawScene()` → `renderRows()` path the upload flow already uses — no new
+endpoint, no pipeline change. Two existing functions in `app.js` were generalized rather than
+duplicated: `recognize()` now attaches the HTTP status to the thrown error, and `drawScene()`
+reads `source.naturalWidth ?? source.width` so it accepts a captured `<canvas>` frame the same way
+it already accepted an uploaded `<img>`.
+
+Because no detector weights exist, every capture answers `503` today. Retrying on the same
+schedule would just hammer a known-broken endpoint, so the loop **auto-stops on the first `503`**
+and re-enables Start; any other error (one garbled frame, a network blip) is shown but the loop
+keeps going, since the next frame is likely fine.
+
+Verified live in a browser: the first run surfaced a real bug the design hadn't anticipated — the
+very first capture fired before the video's `loadedmetadata` event, so `videoWidth`/`videoHeight`
+were still `0` and every camera session opened with a guaranteed, misleading `400` before the
+`503`. Fixed by awaiting `loadedmetadata` (or checking `readyState`) before the first capture.
+Re-verified: exactly one request, a clean `503`, Start/Stop/video state all reset correctly. The
+upload flow was re-checked afterward against the two edited shared functions — unchanged
+behaviour, no regression.
+
+**Known gap:** permission-denial and manual mid-capture Stop were not independently exercised —
+the automated session's `getUserMedia` was auto-granted with no fake device, and the loop
+auto-stopped on `503` faster than a manual Stop click could race it. `stopCamera()` is the same
+function both paths call, and it was verified via the auto-stop path, so this is a coverage gap
+in the *test*, not unverified code — but it should be said plainly rather than implied covered.
+
 ### ⚠️ Known gaps carried forward
 1. **The happy path has never run against real weights.** Every box and every string seen in a
    browser so far came from a stub. The `503` is the only end-to-end-honest browser result.
 2. **All Phase 3–6 gaps still stand**: 412 ms vs the `<100 ms` budget, detection untimed,
    evidence entirely synthetic.
-3. **No UI affordance for slow responses beyond a disabled button.** At 412 ms that is fine; if
-   a trained detector pushes it higher it will not be.
+3. ~~No UI affordance for slow responses beyond a disabled button.~~ Partially addressed by the
+   camera loop's own auto-stop-on-503, but the upload flow's disabled-button-only feedback during
+   a slow request is still unchanged.

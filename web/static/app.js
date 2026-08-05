@@ -12,9 +12,13 @@ const previewPanel = document.getElementById("preview-panel");
 const canvas = document.getElementById("preview");
 const results = document.getElementById("results");
 const resultsBody = document.getElementById("results-body");
+const cameraFeed = document.getElementById("camera-feed");
+const startCameraButton = document.getElementById("start-camera-button");
+const stopCameraButton = document.getElementById("stop-camera-button");
 
 const BOX_COLOUR = "#e0245e";
 const BOX_WIDTH = 3;
+const CAPTURE_INTERVAL_MS = 1500;
 
 // Only 503 is reworded: the API's "Detector model is not available" is accurate
 // but does not tell someone looking at a browser what to do about it. Every
@@ -59,8 +63,11 @@ function drawScene(plates) {
     return;
   }
 
-  canvas.width = loadedImage.naturalWidth;
-  canvas.height = loadedImage.naturalHeight;
+  // An uploaded file decodes to an Image (naturalWidth/naturalHeight); a captured
+  // camera frame is drawn onto an in-memory canvas (width/height). Both are valid
+  // drawImage() sources, so only the size lookup needs to branch.
+  canvas.width = loadedImage.naturalWidth ?? loadedImage.width;
+  canvas.height = loadedImage.naturalHeight ?? loadedImage.height;
 
   const context = canvas.getContext("2d");
   context.drawImage(loadedImage, 0, 0);
@@ -145,7 +152,9 @@ async function recognize(file) {
   }
 
   if (response.status === 503) {
-    throw new Error(WEIGHTS_MISSING);
+    const error = new Error(WEIGHTS_MISSING);
+    error.status = response.status;
+    throw error;
   }
 
   let detail = `Recognition failed (HTTP ${response.status}).`;
@@ -157,7 +166,9 @@ async function recognize(file) {
   } catch {
     // A non-JSON error body is not worth reporting over the status code.
   }
-  throw new Error(detail);
+  const error = new Error(detail);
+  error.status = response.status;
+  throw error;
 }
 
 fileInput.addEventListener("change", async () => {
@@ -211,3 +222,94 @@ form.addEventListener("submit", async (event) => {
     submitButton.disabled = false;
   }
 });
+
+// Live camera capture. Same recognize()/drawScene()/renderRows() as the upload
+// flow above — a captured frame is just a different image source for them.
+let cameraStream = null;
+let captureTimer = null;
+let capturing = false;
+
+/** Request the camera, show the live feed, and start the capture loop. */
+async function startCamera() {
+  cameraStream = await navigator.mediaDevices.getUserMedia({
+    video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+  });
+  cameraFeed.srcObject = cameraStream;
+  cameraFeed.hidden = false;
+  stopCameraButton.hidden = false;
+  startCameraButton.disabled = true;
+  submitButton.disabled = true; // don't race the upload flow's own /recognize call
+
+  // videoWidth/videoHeight are 0 until metadata loads; capturing before then
+  // would send an empty frame and draw a guaranteed, misleading 400.
+  if (cameraFeed.readyState < HTMLMediaElement.HAVE_METADATA) {
+    await new Promise((resolve) => {
+      cameraFeed.addEventListener("loadedmetadata", resolve, { once: true });
+    });
+  }
+
+  capturing = true;
+  captureAndRecognize();
+}
+
+/** Stop the loop and release the camera. */
+function stopCamera() {
+  capturing = false;
+  clearTimeout(captureTimer);
+  if (cameraStream) {
+    cameraStream.getTracks().forEach((track) => track.stop());
+    cameraStream = null;
+  }
+  cameraFeed.hidden = true;
+  stopCameraButton.hidden = true;
+  startCameraButton.disabled = false;
+  submitButton.disabled = false;
+}
+
+/**
+ * Grab the current video frame, recognize it, and schedule the next one.
+ *
+ * A 503 means the detector isn't installed and every future frame would fail
+ * the same way, so the loop stops itself instead of hammering a known-broken
+ * endpoint. Any other error (a single garbled frame, a network blip) is shown
+ * and the loop keeps going — the next frame is likely fine.
+ */
+async function captureAndRecognize() {
+  const frame = document.createElement("canvas");
+  frame.width = cameraFeed.videoWidth;
+  frame.height = cameraFeed.videoHeight;
+  frame.getContext("2d").drawImage(cameraFeed, 0, 0);
+
+  const blob = await new Promise((resolve) => frame.toBlob(resolve, "image/jpeg", 0.85));
+  const file = new File([blob], "frame.jpg", { type: "image/jpeg" });
+
+  try {
+    const result = await recognize(file);
+    loadedImage = frame;
+    drawScene(result.plates);
+    renderRows(result.plates);
+    setStatus(
+      result.count === 0
+        ? "No plates detected."
+        : `${result.count} plate${result.count === 1 ? "" : "s"} detected.`,
+    );
+  } catch (error) {
+    setStatus(error.message, "error");
+    if (error.status === 503) {
+      stopCamera();
+      return;
+    }
+  }
+
+  if (capturing) {
+    captureTimer = setTimeout(captureAndRecognize, CAPTURE_INTERVAL_MS);
+  }
+}
+
+startCameraButton.addEventListener("click", () => {
+  startCamera().catch((error) => {
+    setStatus(error.message, "error");
+  });
+});
+
+stopCameraButton.addEventListener("click", stopCamera);
