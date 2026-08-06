@@ -15,6 +15,9 @@ const resultsBody = document.getElementById("results-body");
 const cameraFeed = document.getElementById("camera-feed");
 const startCameraButton = document.getElementById("start-camera-button");
 const stopCameraButton = document.getElementById("stop-camera-button");
+const uploadModeButton = document.getElementById("upload-mode-button");
+const cameraModeButton = document.getElementById("camera-mode-button");
+const cameraPanel = document.getElementById("camera-panel");
 
 const BOX_COLOUR = "#e0245e";
 const BOX_WIDTH = 3;
@@ -313,3 +316,18 @@ startCameraButton.addEventListener("click", () => {
 });
 
 stopCameraButton.addEventListener("click", stopCamera);
+
+/** Show the upload form or the camera panel, never both. */
+function setMode(mode) {
+  const isCamera = mode === "camera";
+  if (!isCamera) {
+    stopCamera();
+  }
+  form.hidden = isCamera;
+  cameraPanel.hidden = !isCamera;
+  uploadModeButton.setAttribute("aria-pressed", String(!isCamera));
+  cameraModeButton.setAttribute("aria-pressed", String(isCamera));
+}
+
+uploadModeButton.addEventListener("click", () => setMode("upload"));
+cameraModeButton.addEventListener("click", () => setMode("camera"));
