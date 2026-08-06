@@ -13,6 +13,8 @@ const canvas = document.getElementById("preview");
 const results = document.getElementById("results");
 const resultsBody = document.getElementById("results-body");
 const cameraFeed = document.getElementById("camera-feed");
+const cameraStage = document.getElementById("camera-stage");
+const trackingOverlay = document.getElementById("tracking-overlay");
 const startCameraButton = document.getElementById("start-camera-button");
 const stopCameraButton = document.getElementById("stop-camera-button");
 const uploadModeButton = document.getElementById("upload-mode-button");
@@ -22,6 +24,9 @@ const cameraPanel = document.getElementById("camera-panel");
 const BOX_COLOUR = "#e0245e";
 const BOX_WIDTH = 3;
 const CAPTURE_INTERVAL_MS = 1500;
+// Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
+// refreshed far more often than the ~400ms full recognize pipeline allows.
+const TRACK_INTERVAL_MS = 200;
 
 // Only 503 is reworded: the API's "Detector model is not available" is accurate
 // but does not tell someone looking at a browser what to do about it. Every
@@ -66,11 +71,8 @@ function drawScene(plates) {
     return;
   }
 
-  // An uploaded file decodes to an Image (naturalWidth/naturalHeight); a captured
-  // camera frame is drawn onto an in-memory canvas (width/height). Both are valid
-  // drawImage() sources, so only the size lookup needs to branch.
-  canvas.width = loadedImage.naturalWidth ?? loadedImage.width;
-  canvas.height = loadedImage.naturalHeight ?? loadedImage.height;
+  canvas.width = loadedImage.naturalWidth;
+  canvas.height = loadedImage.naturalHeight;
 
   const context = canvas.getContext("2d");
   context.drawImage(loadedImage, 0, 0);
@@ -174,6 +176,40 @@ async function recognize(file) {
   throw error;
 }
 
+/** Post the file to /detect, raising a readable error on failure.
+ *
+ * Deliberately parallel to recognize() above: same 503 wording, same status
+ * carried on the error so a caller can tell "stop" from "retry next frame".
+ */
+async function detectOnly(file) {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await fetch("/detect", { method: "POST", body });
+  if (response.ok) {
+    return response.json();
+  }
+
+  if (response.status === 503) {
+    const error = new Error(WEIGHTS_MISSING);
+    error.status = response.status;
+    throw error;
+  }
+
+  let detail = `Detection failed (HTTP ${response.status}).`;
+  try {
+    const payload = await response.json();
+    if (typeof payload.detail === "string") {
+      detail = payload.detail;
+    }
+  } catch {
+    // A non-JSON error body is not worth reporting over the status code.
+  }
+  const error = new Error(detail);
+  error.status = response.status;
+  throw error;
+}
+
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   results.hidden = true;
@@ -226,10 +262,19 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-// Live camera capture. Same recognize()/drawScene()/renderRows() as the upload
-// flow above — a captured frame is just a different image source for them.
+// Live camera capture. Two loops run while the camera is on:
+//
+//   - the track loop hits /detect every 200ms and strokes the boxes onto a
+//     transparent canvas over the still-playing video, so a box follows a
+//     moving plate;
+//   - the recognize loop hits /recognize every 1.5s and refreshes the results
+//     table, which is all the slow full pipeline is needed for here.
+//
+// Camera mode therefore never draws to #preview-panel — drawScene() and the
+// preview canvas belong to the upload flow alone.
 let cameraStream = null;
 let captureTimer = null;
+let trackTimer = null;
 let capturing = false;
 
 /** Request the camera, show the live feed, and start the capture loop. */
@@ -238,7 +283,7 @@ async function startCamera() {
     video: { width: { ideal: 1280 }, height: { ideal: 720 } },
   });
   cameraFeed.srcObject = cameraStream;
-  cameraFeed.hidden = false;
+  cameraStage.hidden = false;
   stopCameraButton.hidden = false;
   startCameraButton.disabled = true;
   submitButton.disabled = true; // don't race the upload flow's own /recognize call
@@ -251,26 +296,91 @@ async function startCamera() {
     });
   }
 
+  // Box coordinates come back in source-frame pixels, so the overlay is sized
+  // to the video's native resolution and left for CSS to scale — the same 1:1
+  // trick drawScene() uses for uploads.
+  trackingOverlay.width = cameraFeed.videoWidth;
+  trackingOverlay.height = cameraFeed.videoHeight;
+
   capturing = true;
   captureAndRecognize();
+  trackLoop();
 }
 
-/** Stop the loop and release the camera. */
+/** Stop both loops and release the camera. */
 function stopCamera() {
   capturing = false;
   clearTimeout(captureTimer);
+  clearTimeout(trackTimer);
   if (cameraStream) {
     cameraStream.getTracks().forEach((track) => track.stop());
     cameraStream = null;
   }
-  cameraFeed.hidden = true;
+  cameraStage.hidden = true;
   stopCameraButton.hidden = true;
   startCameraButton.disabled = false;
   submitButton.disabled = false;
 }
 
+/** Copy the current video frame into an in-memory canvas. */
+function captureFrame() {
+  const frame = document.createElement("canvas");
+  frame.width = cameraFeed.videoWidth;
+  frame.height = cameraFeed.videoHeight;
+  frame.getContext("2d").drawImage(cameraFeed, 0, 0);
+  return frame;
+}
+
+/** Encode a captured frame as the JPEG upload both endpoints expect. */
+async function frameToFile(frame) {
+  const blob = await new Promise((resolve) => frame.toBlob(resolve, "image/jpeg", 0.85));
+  return new File([blob], "frame.jpg", { type: "image/jpeg" });
+}
+
 /**
- * Grab the current video frame, recognize it, and schedule the next one.
+ * Replace the overlay's boxes with this frame's.
+ *
+ * No row numbers here, unlike drawScene(): at this cadence a box has no stable
+ * correspondence to a row in the (much slower) results table, so a number would
+ * point at the wrong plate more often than the right one.
+ */
+function drawTrackingBoxes(boxes) {
+  const context = trackingOverlay.getContext("2d");
+  context.clearRect(0, 0, trackingOverlay.width, trackingOverlay.height);
+  context.strokeStyle = BOX_COLOUR;
+  context.lineWidth = BOX_WIDTH;
+  boxes.forEach(({ x1, y1, x2, y2 }) => {
+    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  });
+}
+
+/**
+ * Redraw the tracking boxes from the current frame, then schedule the next tick.
+ *
+ * The next tick is scheduled only once this one has resolved, so a slow response
+ * stretches the cadence instead of stacking requests behind each other.
+ */
+async function trackLoop() {
+  try {
+    const result = await detectOnly(await frameToFile(captureFrame()));
+    drawTrackingBoxes(result.boxes);
+  } catch (error) {
+    if (error.status === 503) {
+      stopCamera();
+      return;
+    }
+    // One dropped tick is not worth taking over the status line the recognize
+    // loop owns; the boxes simply stay put until the next frame lands.
+  }
+
+  if (capturing) {
+    trackTimer = setTimeout(trackLoop, TRACK_INTERVAL_MS);
+  }
+}
+
+/**
+ * Recognize the current video frame into the results table, then schedule the
+ * next one.
  *
  * A 503 means the detector isn't installed and every future frame would fail
  * the same way, so the loop stops itself instead of hammering a known-broken
@@ -278,18 +388,8 @@ function stopCamera() {
  * and the loop keeps going — the next frame is likely fine.
  */
 async function captureAndRecognize() {
-  const frame = document.createElement("canvas");
-  frame.width = cameraFeed.videoWidth;
-  frame.height = cameraFeed.videoHeight;
-  frame.getContext("2d").drawImage(cameraFeed, 0, 0);
-
-  const blob = await new Promise((resolve) => frame.toBlob(resolve, "image/jpeg", 0.85));
-  const file = new File([blob], "frame.jpg", { type: "image/jpeg" });
-
   try {
-    const result = await recognize(file);
-    loadedImage = frame;
-    drawScene(result.plates);
+    const result = await recognize(await frameToFile(captureFrame()));
     renderRows(result.plates);
     setStatus(
       result.count === 0

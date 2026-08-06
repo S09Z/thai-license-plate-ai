@@ -122,6 +122,24 @@ canvas {
   display: none;
 }
 
+/* The live video and its tracking overlay share one box: the video sets the
+   rendered size, and the absolutely-positioned canvas is stretched over it. */
+#camera-stage {
+  position: relative;
+}
+
+#camera-stage[hidden] {
+  display: none;
+}
+
+#tracking-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 #camera-feed {
   display: block;
   max-width: 100%;
