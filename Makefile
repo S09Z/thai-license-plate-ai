@@ -13,6 +13,7 @@ help:
 	@echo "bench-ocr       Run docs/benchmark/bench_ocr.py"
 	@echo "bench-rag       Run docs/benchmark/bench_rag.py"
 	@echo "bench-recognize Run docs/benchmark/bench_recognize.py"
+	@echo "bench-detect    Run docs/benchmark/bench_detect.py"
 	@echo "clean           Remove Python and pytest caches"
 
 install:
@@ -38,7 +39,7 @@ check: test lint format-check typecheck
 run:
 	poetry run uvicorn app.main:app --reload
 
-bench: bench-ocr bench-rag bench-recognize
+bench: bench-ocr bench-rag bench-recognize bench-detect
 
 bench-ocr:
 	poetry run python docs/benchmark/bench_ocr.py
@@ -48,6 +49,9 @@ bench-rag:
 
 bench-recognize:
 	poetry run python docs/benchmark/bench_recognize.py
+
+bench-detect:
+	poetry run python docs/benchmark/bench_detect.py
 
 clean:
 	find . -type d -name "__pycache__" -not -path "./.venv/*" -exec rm -rf {} +
