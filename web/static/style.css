@@ -132,11 +132,18 @@ canvas {
   display: none;
 }
 
+/* Resets the shared `canvas` rule above: that one styles the upload preview,
+   which is a picture in its own right. This canvas is a transparent sheet over
+   the video, so an opaque background would hide the feed entirely, and its
+   border and radius would draw a second frame around the video's own. */
 #tracking-overlay {
   position: absolute;
   inset: 0;
   width: 100%;
   height: 100%;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
   pointer-events: none;
 }
 
