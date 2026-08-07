@@ -130,6 +130,13 @@ canvas {
   gap: 0.4rem;
 }
 
+/* Descendant-scoped for the same reason: a bare `select` rule would be free to
+   reach any future dropdown elsewhere on the page. */
+.toggle select {
+  font: inherit;
+  padding: 0.2rem 0.3rem;
+}
+
 /* The live video and its tracking overlay share one box: the video sets the
    rendered size, and the absolutely-positioned canvas is stretched over it. */
 #camera-stage {

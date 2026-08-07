@@ -3,9 +3,9 @@
 Detection only: the response carries coordinates, never an identity.
 """
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, HTTPException, Query, UploadFile, status
 
-from app.schemas.detection import DetectionResponse
+from app.schemas.face import FaceResponse
 from app.services.face_service import detect_faces
 from app.utils.image import (
     ImageTooLargeError,
@@ -16,25 +16,33 @@ from app.utils.image import (
 router = APIRouter(tags=["face"])
 
 
-@router.post("/detect/faces", response_model=DetectionResponse)
-async def detect_faces_route(file: UploadFile) -> DetectionResponse:
+@router.post("/detect/faces", response_model=FaceResponse)
+async def detect_faces_route(
+    file: UploadFile,
+    landmarks: bool = Query(
+        False, description="Fit eyebrow, eye, nose and mouth points inside each face."
+    ),
+) -> FaceResponse:
     """Detect human faces in an uploaded image.
 
     Args:
         file: The uploaded image (JPEG or PNG).
+        landmarks: Opt in to feature points. Off by default: fitting costs
+            extra CPU per face and needs a model the endpoint otherwise never
+            touches.
 
     Returns:
-        A :class:`DetectionResponse` with the detected face boxes.
+        A :class:`FaceResponse` with the detected faces.
 
     Raises:
         HTTPException: ``415`` for a disallowed content type, ``413`` for an
             oversize upload, ``400`` for bytes that do not decode to an image,
-            and ``503`` when the face model is not installed.
+            and ``503`` when a model this request needs is not installed.
     """
     data = await file.read()
 
     try:
-        return detect_faces(data, file.content_type or "")
+        return detect_faces(data, file.content_type or "", landmarks=landmarks)
     except UnsupportedImageTypeError as error:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(error)
@@ -50,5 +58,5 @@ async def detect_faces_route(file: UploadFile) -> DetectionResponse:
     except FileNotFoundError as error:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Face detection model is not available",
+            detail="A face model required by this request is not available",
         ) from error
