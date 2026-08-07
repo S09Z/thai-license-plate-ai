@@ -35,6 +35,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 7 ✅ | Web UI | `web/static/`, `app/api/web.py` | ~~jinja2/gradio~~ **none** (see Part H) | done — upload → boxed canvas + results table; abstention shown as "Unknown" |
 | 8 ✅ | UI mode switch | `web/static/` | — | done — Upload / Live camera toggle, one panel at a time (see Part I.1) |
 | 9 ✅ | Realtime tracking | `web/static/` | — | done — `/detect` at 200 ms strokes boxes over the live video; `/recognize` stays at 1.5 s for the table (see Part I.2) |
+| 10 ✅ | Face detection boxes | `face/`, `app/api/face.py`, `web/static/` | — (opencv's bundled YuNet) | done — `POST /detect/faces`, opt-in overlay beside plate boxes; **17.6ms vs <25ms budget — met (see Part J)** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -610,3 +611,108 @@ background; harmless because it sits *behind* the video, but it is the same late
    latency; the loop degrades gracefully (cadence stretches, no stacking) but the number would not
    hold.
 4. **No `beforeunload`/`visibilitychange` release** — carried forward from Part H unchanged.
+
+---
+
+## Part J — Face Detection Slice (✅ shipped 2026-08-07)
+
+Phase 9 put plate boxes on the live video. This puts **face boxes** beside them, in a distinct
+colour, behind an opt-in checkbox that is **off by default** — face inference should not be paid for
+unless it is asked for.
+
+### Scope boundary, deliberate and load-bearing
+
+This is face **detection** — locating a region in a frame — and explicitly **not** face
+**recognition**. Nothing here identifies a person, computes an embedding, matches against a gallery,
+or persists a frame. YuNet returns five landmarks per face and they are **discarded** at the wrapper
+boundary; the endpoint reports coordinates and a score, nothing else.
+
+If identification is ever wanted it is a different feature with different consent and legal
+questions — Thailand's PDPA treats biometric identifiers as sensitive personal data — and should be
+designed as such, not bolted onto this endpoint.
+
+### Decisions
+
+- **YuNet ONNX over a Haar cascade**, on measurement rather than reputation. Haar was timed first at
+  720p: 6.1 ms on a blank frame but **56.0 ms on a textured one**, a 9× content-dependent swing that
+  breaks the `<25 ms` budget on its own. YuNet does not show that spread (16.6 vs 17.6 ms), and the
+  benchmark times both frame kinds specifically to *check* that rather than assume it. Full numbers
+  in `docs/benchmark/face-phase10.md`.
+- **A separate `POST /detect/faces` rather than a flag on `/detect`.** Different model, different
+  failure mode, different opt-in. It also lets the camera tick request faces only when wanted.
+- **`DetectionResponse` reused unchanged.** The shape (`count`, `boxes`) and the meaning are
+  identical to a plate box; a `FaceResponse` clone would be a distinction without a difference.
+  `face/detector.py` likewise returns `detector.detector.Detection` — importing that frozen dataclass
+  is a one-way dependency on a pure value type, cheaper than a duplicate plus mapping code.
+- **Structure copied from the plate detector deliberately**: lazy load on first `detect()`,
+  module-level `_load_yunet` so tests patch it exactly as `_load_yolo` is patched, `FileNotFoundError`
+  → 503, `@lru_cache` service singleton, identical 415/413/400/503 exception mapping.
+
+### Deviation from the plan: a missing face model no longer stops the camera
+
+The plan specified that `detectFaces()` mirror `detectOnly()` so that a 503 "stops the session the
+same way". Implemented literally, that meant a missing *face* model would kill *plate* tracking too.
+
+The rationale for stopping was "don't hammer a known-broken endpoint" — and unticking the checkbox
+achieves that completely, since the face request is then not issued at all. So a face 503 now
+unticks "Show faces" and reports why, while plate tracking continues; a **plate** 503 still calls
+`stopCamera()` unchanged. Verified live: with the face model absent, `/detect/faces` returns 503 and
+`/detect` on the same server returns 200.
+
+### Measured — `docs/benchmark/face-phase10.md`
+
+| | Median | Budget |
+|---|---|---|
+| Face, flat 720p frame | 16.6 ms | |
+| Face, textured 720p frame | **17.6 ms** | `<25 ms` ✅ **met** |
+| Camera tick, both requests concurrent | 23.0 ms | |
+| Camera tick, if issued serially | 40.6 ms | |
+
+The tick issues both requests from a **single captured frame** via `Promise.all`, so it costs the
+slower stage rather than the sum. Cold start is 203 ms, paid once per process.
+
+This is the **second stage to meet its budget**, after RAG. Note it is not on the `/recognize` path
+at all, so it does not affect the 4.1× total-pipeline miss that OCR still dominates.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `POST /detect/faces` on a **real photograph** | ✅ 1 box, conf **0.946**, visually confirmed on the face |
+| w/h → x1,y1,x2,y2 conversion against live model output | ✅ correct (the real-photo box lands on the face) |
+| 415 / 413 / 400 / 503 mapping | ✅ all four, against a live server |
+| Face model absent → 503, plates unaffected | ✅ `/detect/faces` 503, `/detect` 200 on the same process |
+| Checkbox **off** → one request per tick | ✅ `/detect` only |
+| Checkbox **on** → both, concurrently | ✅ `/detect` + `/detect/faces`, issued 0 ms apart, **one** frame built |
+| Single `clearRect` per tick | ✅ `clearRect → strokeRect(#e0245e) → strokeRect(#00b8d4)`; faces do not erase plates |
+| `.toggle` did not leak to the upload form | ✅ `#file-input` still `display: block`, `gap: normal` |
+| `/detect`, `/recognize`, `/health` regression | ✅ 200 each; `/detect/faces` present in the OpenAPI schema |
+| `pytest` / `ruff` / `black` / `mypy` | ✅ **112 passed** (98 + 14 new), all clean |
+
+Both browser passes force-reloaded the static assets before checking anything, per the stale-cache
+lesson in Part I. **A stale server nearly invalidated this one too**: two `uvicorn` processes from
+earlier sessions were still bound to port 8000 and answered the first round of endpoint checks.
+Those results were discarded and every check re-run against a single, verified-fresh process.
+
+### Deliberately not built
+
+- No recognition, embeddings, identity matching, or frame persistence (see the scope boundary).
+- No redaction/blur — `POST /redact` stays a separate future feature.
+- No face boxes in the **upload** flow; the request was camera mode, and `/recognize` has its own
+  response shape that faces would not fit without changing a shipped schema.
+- No configurable face-track interval — `TRACK_INTERVAL_MS` governs both loops.
+- No landmark rendering — that is Phase 11, which builds on this phase's boxes.
+
+### ⚠️ Known gaps
+
+1. **Detection accuracy is essentially unmeasured.** One public-domain still photograph was detected
+   correctly at 0.946. That is a single frontal, well-lit portrait — it is *not* evidence for the
+   conditions this feature runs in. There is still **no camera device in this environment**, so no
+   face has ever been tracked in a live stream, at an angle, in motion, or in poor light.
+2. **The benchmark frames contain no faces**, so the latency figures bound speed only. YuNet's cost
+   is input-size-bound, so faces being present should not change them — but that is reasoning, not a
+   measurement.
+3. **The model is gitignored** (`.gitignore:47`, `*.onnx`), so a fresh clone must run
+   `make fetch-face-model`. Absent, the endpoint answers 503 by design and the checkbox unticks
+   itself rather than failing silently.
+4. **The 200 ms tick is measured against `127.0.0.1`** — carried forward from Part I unchanged.
