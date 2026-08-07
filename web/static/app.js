@@ -569,6 +569,23 @@ function setMode(mode) {
   cameraPanel.hidden = !isCamera;
   uploadModeButton.setAttribute("aria-pressed", String(!isCamera));
   cameraModeButton.setAttribute("aria-pressed", String(isCamera));
+
+  // A result belongs to the mode that produced it. Without this, the last
+  // upload's photo and plate table stay on screen under the live feed, reading
+  // as if they described what the camera is looking at. Both directions are
+  // cleared, not just the switch into camera: the camera's rows are equally
+  // stale once the upload form is back. Hiding these on `isCamera` alone would
+  // *reveal* an empty canvas and a bare table header on the way back.
+  previewPanel.hidden = true;
+  results.hidden = true;
+  resultsBody.replaceChildren();
+  setStatus("");
+
+  // The file input still names a file, so the upload panel should still show
+  // its preview — without boxes, since those results were just discarded.
+  if (!isCamera && loadedImage) {
+    drawScene([]);
+  }
 }
 
 uploadModeButton.addEventListener("click", () => setMode("upload"));
