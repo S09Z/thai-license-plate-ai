@@ -17,6 +17,9 @@ class FacialLandmarksModel(BaseModel):
     ``right`` and ``left`` are the *subject's*, following the iBUG-68
     convention, so the right-hand groups appear on the left of the image.
 
+    The last three are the whole-face mesh and are ``None`` unless ``mesh``
+    was requested; the jaw traces the face boundary, which is opt-in.
+
     Attributes:
         right_eyebrow: Points along the subject's right eyebrow.
         left_eyebrow: Points along the subject's left eyebrow.
@@ -24,6 +27,9 @@ class FacialLandmarksModel(BaseModel):
         right_eye: Points around the subject's right eye.
         left_eye: Points around the subject's left eye.
         mouth: Points around the outer and inner lips.
+        jaw: Points along the face boundary, mesh only.
+        points: All 68 points in iBUG order, the array ``triangles`` indexes.
+        triangles: Delaunay triangles as index triples into ``points``.
     """
 
     right_eyebrow: list[tuple[int, int]]
@@ -32,6 +38,9 @@ class FacialLandmarksModel(BaseModel):
     right_eye: list[tuple[int, int]]
     left_eye: list[tuple[int, int]]
     mouth: list[tuple[int, int]]
+    jaw: list[tuple[int, int]] | None = None
+    points: list[tuple[int, int]] | None = None
+    triangles: list[tuple[int, int, int]] | None = None
 
 
 class Face(BaseModel):

@@ -43,10 +43,15 @@ const FEATURE_STROKES = [
   { group: "mouth", colour: "#ff4081", closed: true, split: 12 },
 ];
 
+// The mesh is one colour, not seven: it is a surface rather than a set of named
+// parts, and colouring the triangles by which feature they overlap would imply
+// a grouping the triangulation does not have.
+const MESH_COLOUR = "#00e5ff";
+
 // A face 503 steps the control down one level rather than off, because the
 // server cannot say which of the two models is missing; the next tick settles
 // it. Falling straight to "off" would hide working face boxes.
-const FACE_MODE_FALLBACK = { features: "boxes", boxes: "off" };
+const FACE_MODE_FALLBACK = { mesh: "features", features: "boxes", boxes: "off" };
 const CAPTURE_INTERVAL_MS = 1500;
 // Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
 // refreshed far more often than the ~400ms full recognize pipeline allows.
@@ -59,7 +64,12 @@ const WEIGHTS_MISSING =
   "Detector model is not installed, so recognition cannot run yet. " +
   "Install trained plate weights at the configured detector path to enable it.";
 
+// Keyed by the mode being stepped *down to*, so each message describes what is
+// still working rather than what just failed.
 const FACE_MODEL_MISSING = {
+  features:
+    "A face model is not installed, so the face mesh is unavailable. " +
+    "Showing facial features only; fetch it with `make fetch-face-landmark-model`.",
   boxes:
     "A face model is not installed, so facial features are unavailable. " +
     "Showing face boxes only; fetch it with `make fetch-face-landmark-model`.",
@@ -251,12 +261,20 @@ async function detectOnly(file) {
  *
  * @param {File} file The captured frame.
  * @param {boolean} landmarks Whether to ask for feature points as well.
+ * @param {boolean} mesh Whether to ask for the whole-face triangulation.
  */
-async function detectFaces(file, landmarks) {
+async function detectFaces(file, landmarks, mesh) {
   const body = new FormData();
   body.append("file", file);
 
-  const url = landmarks ? "/detect/faces?landmarks=true" : "/detect/faces";
+  // `mesh` already implies fitting server-side, so it wins outright rather
+  // than being combined with `landmarks`.
+  let url = "/detect/faces";
+  if (mesh) {
+    url = "/detect/faces?mesh=true";
+  } else if (landmarks) {
+    url = "/detect/faces?landmarks=true";
+  }
   const response = await fetch(url, { method: "POST", body });
   if (response.ok) {
     return response.json();
@@ -435,8 +453,16 @@ function drawTrackingBoxes(plates, faces) {
     context.strokeRect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
   });
 
+  // Which renderer runs is decided by what the response carries, not by the
+  // dropdown: the mode that produced the data is already encoded in it, and
+  // reading the control here could disagree with the frame in hand.
   faces.forEach(({ landmarks }) => {
-    if (landmarks) {
+    if (!landmarks) {
+      return;
+    }
+    if (landmarks.triangles) {
+      drawMesh(context, landmarks);
+    } else {
       drawLandmarks(context, landmarks);
     }
   });
@@ -476,6 +502,26 @@ function drawLandmarks(context, landmarks) {
   });
 }
 
+/** Draw one face as a Delaunay triangle wireframe.
+ *
+ * The server sends triangles as index triples into `points` rather than as
+ * coordinates, so the topology arrives at a quarter of the payload.
+ *
+ * Like drawLandmarks(), this runs after the tick's single clearRect().
+ */
+function drawMesh(context, landmarks) {
+  const points = landmarks.points ?? [];
+  context.lineWidth = FEATURE_WIDTH;
+  context.strokeStyle = MESH_COLOUR;
+  (landmarks.triangles ?? []).forEach((triangle) => {
+    const corners = triangle.map((index) => points[index]);
+    if (corners.some((corner) => corner === undefined)) {
+      return;
+    }
+    strokePolyline(context, corners, true);
+  });
+}
+
 /**
  * Redraw the tracking boxes from the current frame, then schedule the next tick.
  *
@@ -494,7 +540,7 @@ async function trackLoop() {
       detectOnly(file),
       faceMode === "off"
         ? Promise.resolve({ faces: [] })
-        : detectFaces(file, faceMode === "features"),
+        : detectFaces(file, faceMode === "features", faceMode === "mesh"),
     ]);
     drawTrackingBoxes(plates.boxes, faces.faces);
   } catch (error) {

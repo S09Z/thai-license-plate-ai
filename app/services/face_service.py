@@ -45,11 +45,14 @@ def _to_model(fitted: FacialLandmarks) -> FacialLandmarksModel:
         right_eye=fitted.right_eye,
         left_eye=fitted.left_eye,
         mouth=fitted.mouth,
+        jaw=fitted.jaw,
+        points=fitted.points,
+        triangles=fitted.triangles,
     )
 
 
 def detect_faces(
-    data: bytes, content_type: str, landmarks: bool = False
+    data: bytes, content_type: str, landmarks: bool = False, mesh: bool = False
 ) -> FaceResponse:
     """Detect human faces in an uploaded image.
 
@@ -59,6 +62,8 @@ def detect_faces(
         data: Raw bytes of the uploaded file.
         content_type: Content type declared by the client.
         landmarks: Whether to fit feature points inside each detected face.
+        mesh: Whether to also report the jaw contour, the flat 68-point array
+            and its triangulation. Implies fitting, so it works on its own.
 
     Returns:
         The detected faces and their count, with landmarks only when asked for.
@@ -87,12 +92,14 @@ def detect_faces(
         for detection in detections
     ]
 
-    if not landmarks:
+    # Mesh implies fitting: the triangulation is built from the fitted points,
+    # so asking for it alone is enough.
+    if not (landmarks or mesh):
         return FaceResponse(count=len(boxes), faces=[Face(box=box) for box in boxes])
 
     # A fit that does not converge returns nothing rather than a partial list,
     # so pad back to one entry per box instead of zipping the boxes away.
-    fitted = get_face_landmarker().fit(image, detections)
+    fitted = get_face_landmarker().fit(image, detections, mesh=mesh)
     groups: list[FacialLandmarksModel | None] = [_to_model(face) for face in fitted] + [
         None
     ] * (len(boxes) - len(fitted))

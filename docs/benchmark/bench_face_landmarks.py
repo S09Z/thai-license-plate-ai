@@ -71,12 +71,14 @@ def _time_fit(
     frame: np.ndarray,
     boxes: list[Detection],
     repeats: int,
+    *,
+    mesh: bool = False,
 ) -> list[float]:
     """Time ``repeats`` warm fits over ``boxes``, in ms."""
     timings: list[float] = []
     for _ in range(repeats):
         started = time.perf_counter()
-        landmarker.fit(frame, boxes)
+        landmarker.fit(frame, boxes, mesh=mesh)
         timings.append((time.perf_counter() - started) * 1000)
     return timings
 
@@ -129,6 +131,13 @@ def main() -> None:
         _time_fit(landmarker, frame, synthetic_boxes(3), args.repeats),
     )
     print(f"{'per extra face':<26}: {(three - one) / 2:6.1f} ms")
+    # The mesh adds a Delaunay pass over the same 68 points, so the interesting
+    # number is the difference rather than the total.
+    meshed = _report(
+        "fit + mesh, 1 face",
+        _time_fit(landmarker, frame, one_box, args.repeats, mesh=True),
+    )
+    print(f"{'mesh overhead':<26}: {meshed - one:6.1f} ms")
     print()
 
     if one > DETECTION_BUDGET_MS:
@@ -169,7 +178,12 @@ def main() -> None:
     fit_median = _report(
         "fit, photograph", _time_fit(landmarker, image, boxes, args.repeats)
     )
+    mesh_median = _report(
+        "fit + mesh, photograph",
+        _time_fit(landmarker, image, boxes, args.repeats, mesh=True),
+    )
     print(f"{'detect + fit, serial':<26}: {detect_median + fit_median:6.1f} ms")
+    print(f"{'detect + mesh, serial':<26}: {detect_median + mesh_median:6.1f} ms")
 
 
 if __name__ == "__main__":
