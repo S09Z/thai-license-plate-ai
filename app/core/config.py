@@ -13,6 +13,10 @@ class Settings(BaseSettings):
         env: Deployment environment (``dev``, ``staging`` or ``prod``).
         log_level: Root logging level (e.g. ``INFO``, ``DEBUG``).
         version: Application version, mirrored from ``pyproject.toml``.
+        detector_model_path: Path to the YOLO plate-detection weights.
+        detector_conf_threshold: Minimum confidence for a kept detection.
+        max_upload_bytes: Largest accepted image upload, in bytes.
+        allowed_image_types: Content types accepted by image endpoints.
     """
 
     model_config = SettingsConfigDict(
@@ -26,6 +30,11 @@ class Settings(BaseSettings):
     env: str = "dev"
     log_level: str = "INFO"
     version: str = "0.1.0"
+
+    detector_model_path: str = "models/detector/best.pt"
+    detector_conf_threshold: float = 0.25
+    max_upload_bytes: int = 10 * 1024 * 1024
+    allowed_image_types: tuple[str, ...] = ("image/jpeg", "image/png")
 
 
 @lru_cache
