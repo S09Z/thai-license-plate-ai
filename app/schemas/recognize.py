@@ -24,6 +24,10 @@ class PlateResult(BaseModel):
             province was resolved.
         province_candidates: Raw text of every row below the plate number,
             kept verbatim so a client can show what was actually read.
+        crop_png: The perspective-corrected plate crop as a ``data:image/png``
+            base64 URI, so a client can show what the OCR actually read.
+            ``None`` unless the request asked for crops; the live camera path
+            leaves it off to keep per-frame payloads small.
     """
 
     box: BoundingBox
@@ -33,6 +37,7 @@ class PlateResult(BaseModel):
     province: str | None
     province_confidence: float | None
     province_candidates: list[str]
+    crop_png: str | None = None
 
 
 class RecognizeResponse(BaseModel):

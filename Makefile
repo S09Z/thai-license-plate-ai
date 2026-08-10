@@ -1,4 +1,4 @@
-.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face bench-face-fast fetch-face-model fetch-face-landmark-model fetch-face-attribute-models clean
+.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-recognize-accuracy bench-detect bench-face bench-face-fast fetch-face-model fetch-face-landmark-model fetch-face-attribute-models clean
 
 help:
 	@echo "install         Install dependencies via Poetry"
@@ -13,6 +13,7 @@ help:
 	@echo "bench-ocr       Run docs/benchmark/bench_ocr.py"
 	@echo "bench-rag       Run docs/benchmark/bench_rag.py"
 	@echo "bench-recognize Run docs/benchmark/bench_recognize.py"
+	@echo "bench-recognize-accuracy  Grade /recognize on the real-plate eval set"
 	@echo "bench-detect    Run docs/benchmark/bench_detect.py"
 	@echo "bench-face      Run docs/benchmark/bench_face.py"
 	@echo "bench-face-fast Run docs/benchmark/bench_face_fast.py"
@@ -37,7 +38,7 @@ format-check:
 	poetry run black --check .
 
 typecheck:
-	poetry run mypy app detector face ocr postprocess rag
+	poetry run mypy app detector face ocr postprocess rag eval
 
 check: test lint format-check typecheck
 
@@ -53,6 +54,9 @@ bench-rag:
 
 bench-recognize:
 	poetry run python docs/benchmark/bench_recognize.py
+
+bench-recognize-accuracy:
+	poetry run python docs/benchmark/bench_recognize_accuracy.py
 
 bench-detect:
 	poetry run python docs/benchmark/bench_detect.py

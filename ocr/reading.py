@@ -56,19 +56,25 @@ class PlateReading:
     province_candidates: tuple[str, ...]
 
 
-def _shares_row(fragment: TextLine, row_top: float, row_bottom: float) -> bool:
-    """Report whether a fragment belongs to the row spanning the given band.
+def _shares_row(fragment: TextLine, anchor: TextLine) -> bool:
+    """Report whether a fragment belongs to a row anchored by another.
+
+    The comparison is against the row's *anchor* — its topmost fragment —
+    rather than the row's accumulated top-to-bottom span. A row's span grows
+    as fragments join it, and on a skewed crop one tall fragment can drag that
+    span down far enough to overlap the band below, merging the province into
+    the number. Anchoring to a fixed fragment keeps a row from growing into
+    the row beneath it.
 
     Args:
         fragment: The fragment being placed.
-        row_top: Topmost edge of the row assembled so far.
-        row_bottom: Bottommost edge of the row assembled so far.
+        anchor: The row's topmost fragment, fixed when the row was opened.
 
     Returns:
         ``True`` when the vertical spans overlap enough to be one visual row.
     """
-    overlap = min(fragment.bottom, row_bottom) - max(fragment.top, row_top)
-    shortest = min(fragment.bottom - fragment.top, row_bottom - row_top)
+    overlap = min(fragment.bottom, anchor.bottom) - max(fragment.top, anchor.top)
+    shortest = min(fragment.bottom - fragment.top, anchor.bottom - anchor.top)
     if shortest <= 0:
         return False
     return overlap / shortest >= _ROW_OVERLAP_RATIO
@@ -77,8 +83,8 @@ def _shares_row(fragment: TextLine, row_top: float, row_bottom: float) -> bool:
 def group_into_rows(fragments: Sequence[TextLine]) -> list[list[TextLine]]:
     """Group recognized fragments into visual rows.
 
-    Fragments whose boxes overlap vertically form one row, ordered left to
-    right within it, which is reading order for a Thai plate.
+    Fragments whose boxes overlap the row's anchor vertically form one row,
+    ordered left to right within it, which is reading order for a Thai plate.
 
     Args:
         fragments: Recognized fragments, in any order.
@@ -87,16 +93,14 @@ def group_into_rows(fragments: Sequence[TextLine]) -> list[list[TextLine]]:
         Rows ordered top to bottom, each ordered left to right.
     """
     rows: list[list[TextLine]] = []
+    anchors: list[TextLine] = []
 
     for fragment in sorted(fragments, key=lambda item: item.top):
-        if rows and _shares_row(
-            fragment,
-            min(item.top for item in rows[-1]),
-            max(item.bottom for item in rows[-1]),
-        ):
+        if rows and _shares_row(fragment, anchors[-1]):
             rows[-1].append(fragment)
         else:
             rows.append([fragment])
+            anchors.append(fragment)
 
     return [sorted(row, key=lambda item: item.left) for row in rows]
 

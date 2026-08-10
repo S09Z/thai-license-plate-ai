@@ -40,6 +40,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 12 ✅ | Whole-face mesh | `face/landmarks.py`, `web/static/` | — (opencv's `cv2.Subdiv2D`) | done — `?mesh=true` adds the jaw and a Delaunay wireframe over all 68 points; **0.4ms on top of the fit, 20.1ms serial vs <25ms — met (see Part L)** |
 | 13 ✅ | Fast realtime face boxes | `app/api/face.py`, `app/services/face_service.py`, `web/static/` | — | done — `?fast=true` downsizes server-side before YuNet (720p 18.5ms → 480px 3.2ms, **5.7×**); the camera loop runs plain face boxes at a 16ms (~60fps target) cadence on their own overlay, decoupled from the 200ms plate loop (see Part M) |
 | 14 ✅ | Face attributes (expression + apparent gender) | `face/attributes.py`, `app/services/face_service.py`, `web/static/` | — (opencv's `cv2.dnn`) | done — `?attributes=true` labels each face via Levi-Hassner gender (Caffe) + OpenCV Zoo expression (ONNX); infer-render-discard, weights hash-pinned in the Makefile; **~18.6ms/face inference vs <25ms — met, but off the fast path (see Part N)** |
+| 15a ✅ | Plate accuracy + UI (3 tabs, rectified crop) | `ocr/reading.py`, `eval/`, `app/services/recognize_service.py`, `web/static/` | — | done — first real-plate accuracy harness (`make bench-recognize-accuracy`): **exact-match 77.3%, CER 0.153→0.063, province 90.9%→95.5%** after a row-grouping fix; UI split into upload / live-plate / live-face tabs; upload table shows the rectified crop (`?include_crops=true`). Latency deferred to 15b (see Part O) |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -1182,3 +1183,65 @@ fraught — it stays permanently out of scope; no code here should ever label a 
 unblocks #6/#7. (Geometry-only expression via the mesh polygon was considered and rejected: it
 discards the skin-texture signal a CNN reads and generally *loses* accuracy — see the 2026-08-10
 discussion; only a learned hybrid, not pure geometry, would help.)
+
+## Part O — Plate Accuracy + 3-Tab UI (✅ shipped 2026-08-10, Phase 15a)
+
+The plate side had never been *measured* on real photographs — earlier benchmarks rendered
+synthetic text. This slice built the first real-plate accuracy scoreboard, fixed the one structural
+error it exposed, and reworked the UI around three explicit tabs. Latency is deliberately left to a
+separate Phase 15b.
+
+### The finding that reframed the phase
+
+Running the full `/recognize` on real dataset images showed the pipeline **already reads plates
+correctly** — 0.94–0.99 OCR confidence on clean plates, via an upgraded **PP-OCRv5 Thai** stack
+(`th_PP-OCRv5_mobile_rec`). This retires the long-standing "no real-plate happy path ever observed"
+note. So 15a became *measure + fix the weak cases*, not *make it work*.
+
+### Decisions
+
+- **Ground truth is hand-verified, not model-derived.** The Roboflow dataset is detection-only
+  (`nc: 1, names: ['license-plate']`) with no plate strings, so `eval/plates.jsonl` carries 22
+  transcribed plates + provinces. Scoring them against the model's own output would be circular.
+- **Pure, unit-tested scoring.** `eval/scoring.py` (exact-match, Levenshtein CER, province accuracy)
+  is I/O-free and tested in isolation; `docs/benchmark/bench_recognize_accuracy.py` drives the real
+  pipeline over the set (`make bench-recognize-accuracy`).
+- **One structural fix only.** `group_into_rows` anchored each row to its accumulated span, so on a
+  skewed crop a tall number-row fragment dragged the span down until the province band merged **into**
+  the plate number (`'ดว กรงเทพมหานคร 4301'`). Fixed by anchoring each row to its **topmost
+  fragment**, so a row cannot grow into the band beneath it. Result: **CER 0.153→0.063, province
+  90.9%→95.5%**, no regressions. The remaining 5 misses are pure OCR character errors (out of scope).
+- **Three tabs, one pipeline each.** Upload / live-plate / live-face replace the old "camera does
+  everything" panel. Each camera tab runs exactly one loop (plate: recognize+track; face: face
+  overlay), unbundling loops that previously both fired. The face-mode selector moved to the face tab
+  and lost its `off` option.
+- **Rectified crop, gated.** `?include_crops=true` attaches each plate's perspective-corrected crop
+  as a base64 PNG (`PlateResult.crop_png`); the upload table shows it as a thumbnail so a misread is
+  diagnosable. The live loop omits it to keep per-frame payloads lean. The crop is our own rendered
+  image bytes — safe as an `<img>` src; recognized Thai text still never touches the canvas.
+
+### Verified
+
+- Full gate green: **166 tests, ruff, black, mypy** (mypy now covers `eval`).
+- Accuracy measured on real plates (numbers above); crop confirmed a valid PNG end-to-end on a real
+  image (`None` by default).
+- **Browser-verified with Playwright**: the three tabs switch with correct pressed states, the face
+  selector shows only on the face tab, and an uploaded real plate renders the box, `1กฒ 1753` (94.0%)
+  / กรุงเทพมหานคร, and the rectified-crop thumbnail in the new table column.
+
+### Deliberately not built
+
+- **Latency** — OCR is still ~350 ms/image (~3.5× the <100 ms budget); the whole of Phase 15b.
+- **No OCR/detector retraining.** The remaining misses are character-level model errors; a model
+  change is its own effort.
+- **No crop thumbnails on the live-plate table** — kept text-only so the per-frame payload stays small.
+- **No prominent "plate card" redesign** — the crop-in-table option was the one chosen.
+
+### ⚠️ Known gaps
+
+1. **Eval set is small (22) and self-transcribed.** Two entries (a decorative and a stylized-font
+   plate) are flagged for human confirmation; the set should grow before headline claims.
+2. **Accuracy is dataset-specific.** All images are one Roboflow set (watermarked, mostly Bangkok);
+   generalization to other cameras/provinces is unmeasured.
+3. **Live camera tabs unverified against a device** — no camera here; only the upload tab and tab
+   switching were exercised in a browser.

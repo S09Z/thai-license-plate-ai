@@ -5,9 +5,13 @@ which shipped as libraries in Phases 2, 4 and 5. It composes them; it adds no
 logic of its own beyond deciding what a failed stage means for the response.
 """
 
+import base64
 import logging
 import time
 from collections.abc import Sequence
+
+import cv2
+import numpy as np
 
 from app.core.config import get_settings
 from app.schemas.detection import BoundingBox
@@ -36,12 +40,32 @@ def _elapsed_ms(since: float) -> float:
     return (time.perf_counter() - since) * 1000
 
 
-def _build_result(box: Detection, lines: Sequence[TextLine]) -> PlateResult:
+def _encode_crop_png(crop: np.ndarray) -> str | None:
+    """Encode a rectified crop as a ``data:image/png`` base64 URI.
+
+    Args:
+        crop: The perspective-corrected plate crop (BGR).
+
+    Returns:
+        The crop as a data URI, or ``None`` if PNG encoding failed.
+    """
+    ok, buffer = cv2.imencode(".png", crop)
+    if not ok:
+        return None
+    encoded = base64.b64encode(buffer.tobytes()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _build_result(
+    box: Detection, lines: Sequence[TextLine], crop: np.ndarray, include_crop: bool
+) -> PlateResult:
     """Turn one plate's recognized fragments into a finished result.
 
     Args:
         box: The detection the fragments were read from.
         lines: Fragments recognized in the rectified crop, in any order.
+        crop: The perspective-corrected crop the fragments were read from.
+        include_crop: Whether to attach the crop as a base64 PNG.
 
     Returns:
         The plate's number and province, each reported as unresolved rather
@@ -61,10 +85,13 @@ def _build_result(box: Detection, lines: Sequence[TextLine]) -> PlateResult:
         province=province.province if province else None,
         province_confidence=province.score if province else None,
         province_candidates=list(reading.province_candidates),
+        crop_png=_encode_crop_png(crop) if include_crop else None,
     )
 
 
-def recognize_plates(data: bytes, content_type: str) -> RecognizeResponse:
+def recognize_plates(
+    data: bytes, content_type: str, include_crops: bool = False
+) -> RecognizeResponse:
     """Run the full pipeline over an uploaded scene.
 
     Every detected plate is recognized, so a scene holding several plates
@@ -74,6 +101,9 @@ def recognize_plates(data: bytes, content_type: str) -> RecognizeResponse:
     Args:
         data: Raw bytes of the uploaded file.
         content_type: Content type declared by the client.
+        include_crops: When true, attach each plate's rectified crop as a
+            base64 PNG so a client can show what was read. Off by default so
+            the live camera path keeps its per-frame payloads small.
 
     Returns:
         One :class:`~app.schemas.recognize.PlateResult` per plate, empty when
@@ -125,7 +155,7 @@ def recognize_plates(data: bytes, content_type: str) -> RecognizeResponse:
         ocr_ms += _elapsed_ms(stage_started)
 
         stage_started = time.perf_counter()
-        plates.append(_build_result(detection, lines))
+        plates.append(_build_result(detection, lines, crop, include_crops))
         postprocess_ms += _elapsed_ms(stage_started)
 
     logger.info(

@@ -14,8 +14,9 @@
     </p>
 
     <div id="mode-switch" role="group" aria-label="Input source">
-      <button type="button" id="upload-mode-button" aria-pressed="true">Upload photo</button>
-      <button type="button" id="camera-mode-button" aria-pressed="false">Live camera</button>
+      <button type="button" id="upload-mode-button" aria-pressed="true">Upload plate</button>
+      <button type="button" id="camera-plate-button" aria-pressed="false">Live camera · plate</button>
+      <button type="button" id="camera-face-button" aria-pressed="false">Live camera · face</button>
     </div>
 
     <form id="upload-form">
@@ -26,11 +27,10 @@
     <div id="camera-panel" hidden>
       <button type="button" id="start-camera-button">Start camera</button>
       <button type="button" id="stop-camera-button" hidden>Stop</button>
-      <label class="toggle" for="face-mode">
+      <label class="toggle" id="face-controls" for="face-mode" hidden>
         Faces
         <select id="face-mode">
-          <option value="off" selected>Off</option>
-          <option value="boxes">Face boxes</option>
+          <option value="boxes" selected>Face boxes</option>
           <option value="features">Facial features</option>
           <option value="mesh">Face mesh</option>
           <option value="attributes">Expression &amp; gender</option>
@@ -53,6 +53,7 @@
       <thead>
         <tr>
           <th><span class="visually-hidden">Box</span></th>
+          <th>Crop</th>
           <th>Plate number</th>
           <th>Confidence</th>
           <th>Province</th>

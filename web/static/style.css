@@ -137,6 +137,13 @@ canvas {
   padding: 0.2rem 0.3rem;
 }
 
+/* `.toggle` sets `display: flex`, which would otherwise win over the `hidden`
+   attribute and keep the face selector visible on the plate tabs. The same
+   cascade trap the comments above guard against, so it gets its own reset. */
+#face-controls[hidden] {
+  display: none;
+}
+
 /* The live video and its tracking overlay share one box: the video sets the
    rendered size, and the absolutely-positioned canvas is stretched over it. */
 #camera-stage {
@@ -229,6 +236,21 @@ td.unverified {
 td.raw {
   color: var(--muted);
   font-size: 0.9rem;
+}
+
+td.crop {
+  width: 6rem;
+}
+
+/* Descendant-scoped so the rule cannot reach the upload preview or the camera
+   feed, which are their own elements, not table thumbnails. */
+td.crop img {
+  display: block;
+  width: 100%;
+  max-width: 5.5rem;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
 }
 
 .visually-hidden {

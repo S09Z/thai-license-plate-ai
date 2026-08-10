@@ -19,8 +19,10 @@ const faceOverlay = document.getElementById("face-overlay");
 const startCameraButton = document.getElementById("start-camera-button");
 const stopCameraButton = document.getElementById("stop-camera-button");
 const uploadModeButton = document.getElementById("upload-mode-button");
-const cameraModeButton = document.getElementById("camera-mode-button");
+const cameraPlateButton = document.getElementById("camera-plate-button");
+const cameraFaceButton = document.getElementById("camera-face-button");
 const cameraPanel = document.getElementById("camera-panel");
+const faceControls = document.getElementById("face-controls");
 const faceModeSelect = document.getElementById("face-mode");
 
 const BOX_COLOUR = "#e0245e";
@@ -169,6 +171,22 @@ function addCell(row, text, className) {
   return cell;
 }
 
+/** Append a crop-thumbnail cell, or a dash when no crop was returned. */
+function addCropCell(row, cropPng) {
+  const cell = document.createElement("td");
+  cell.className = "crop";
+  if (cropPng) {
+    const image = document.createElement("img");
+    image.src = cropPng;
+    image.alt = "Rectified plate crop";
+    cell.appendChild(image);
+  } else {
+    cell.textContent = "—";
+  }
+  row.appendChild(cell);
+  return cell;
+}
+
 /** Render a confidence as a percentage, or a dash when there is none. */
 function formatConfidence(value) {
   return value === null || value === undefined ? "—" : `${(value * 100).toFixed(1)}%`;
@@ -182,6 +200,12 @@ function renderRows(plates) {
     const row = document.createElement("tr");
 
     addCell(row, `${index + 1}.`, "index");
+
+    // The rectified crop, so a reader can see what the OCR was looking at.
+    // `crop_png` is a data: URI the server built from our own perspective
+    // correction — image bytes, never markup, and never recognized text — so
+    // it is safe as an <img> src. Absent on the live path, shown as a dash.
+    addCropCell(row, plate.crop_png);
 
     // A number that failed the plate pattern is shown exactly as read and
     // marked, never cleaned up into something plausible.
@@ -211,12 +235,19 @@ function renderRows(plates) {
   results.hidden = plates.length === 0;
 }
 
-/** Post the file to /recognize, raising a readable error on failure. */
-async function recognize(file) {
+/** Post the file to /recognize, raising a readable error on failure.
+ *
+ * @param {File} file The image to recognize.
+ * @param {boolean} includeCrops Whether to ask the server to attach each
+ *   plate's rectified crop. The upload flow does; the live loop does not, to
+ *   keep its per-frame payloads small.
+ */
+async function recognize(file, includeCrops) {
   const body = new FormData();
   body.append("file", file);
 
-  const response = await fetch("/recognize", { method: "POST", body });
+  const url = includeCrops ? "/recognize?include_crops=true" : "/recognize";
+  const response = await fetch(url, { method: "POST", body });
   if (response.ok) {
     return response.json();
   }
@@ -367,7 +398,7 @@ form.addEventListener("submit", async (event) => {
   setStatus("Recognizing…");
 
   try {
-    const result = await recognize(file);
+    const result = await recognize(file, true);
     drawScene(result.plates);
     renderRows(result.plates);
     setStatus(
@@ -404,6 +435,10 @@ let captureTimer = null;
 let trackTimer = null;
 let faceTimer = null;
 let capturing = false;
+// Which camera tab is active: "plate" runs the recognize + plate-box loops and
+// fills the table; "face" runs the face loop alone. Each camera tab drives
+// exactly one pipeline, so the two overlays never fight over a frame.
+let cameraTab = "plate";
 
 /** Request the camera, show the live feed, and start the capture loop. */
 async function startCamera() {
@@ -433,9 +468,15 @@ async function startCamera() {
   faceOverlay.height = cameraFeed.videoHeight;
 
   capturing = true;
-  captureAndRecognize();
-  trackLoop();
-  faceLoop();
+  // Each tab runs only its own loops: the plate tab reads the number into the
+  // table and tracks plate boxes; the face tab draws the face overlay. Running
+  // the other tab's loops would waste frames and cross the two surfaces.
+  if (cameraTab === "face") {
+    faceLoop();
+  } else {
+    captureAndRecognize();
+    trackLoop();
+  }
 }
 
 /** Stop all three loops and release the camera. */
@@ -672,17 +713,24 @@ async function faceLoop() {
       drawFaces(result.faces);
     } catch (error) {
       if (error.status === 503) {
-        // A missing face model disables only the overlay it powers; plate
-        // tracking keeps working, so the session stays up one mode lower.
         const fallback = FACE_MODE_FALLBACK[mode] ?? "off";
+        // "off" means even plain boxes failed, so the base face detector is
+        // missing and nothing on this face-only tab can render — stop rather
+        // than leave a dead feed. (On the plate tab a face 503 can't occur.)
+        if (fallback === "off") {
+          setStatus(FACE_MODEL_MISSING.off, "error");
+          stopCamera();
+          return;
+        }
+        // Otherwise step down one level: the select settles on the highest
+        // working mode by itself. Attributes name their own models to fetch.
         faceModeSelect.value = fallback;
-        // Attributes need their own two models, which the generic per-mode
-        // messages do not name; step down but say what to fetch.
-        const message =
+        setStatus(
           mode === "attributes"
             ? FACE_ATTRIBUTES_MISSING
-            : FACE_MODEL_MISSING[fallback];
-        setStatus(message, "error");
+            : FACE_MODEL_MISSING[fallback],
+          "error",
+        );
       }
       // One dropped tick is left alone; the boxes stay put until the next frame.
     }
@@ -704,7 +752,7 @@ async function faceLoop() {
  */
 async function captureAndRecognize() {
   try {
-    const result = await recognize(await frameToFile(captureFrame()));
+    const result = await recognize(await frameToFile(captureFrame()), false);
     renderRows(result.plates);
     setStatus(
       result.count === 0
@@ -732,34 +780,46 @@ startCameraButton.addEventListener("click", () => {
 
 stopCameraButton.addEventListener("click", stopCamera);
 
-/** Show the upload form or the camera panel, never both. */
+/** Switch between the three tabs: upload, live plate, live face.
+ *
+ * @param {"upload"|"plate"|"face"} mode The tab to show.
+ */
 function setMode(mode) {
-  const isCamera = mode === "camera";
-  if (!isCamera) {
-    stopCamera();
-  }
-  form.hidden = isCamera;
-  cameraPanel.hidden = !isCamera;
-  uploadModeButton.setAttribute("aria-pressed", String(!isCamera));
-  cameraModeButton.setAttribute("aria-pressed", String(isCamera));
+  // Always release the camera on any switch, including plate<->face: the two
+  // camera tabs run different loops, so the feed is restarted for the new one.
+  stopCamera();
 
-  // A result belongs to the mode that produced it. Without this, the last
-  // upload's photo and plate table stay on screen under the live feed, reading
-  // as if they described what the camera is looking at. Both directions are
-  // cleared, not just the switch into camera: the camera's rows are equally
-  // stale once the upload form is back. Hiding these on `isCamera` alone would
-  // *reveal* an empty canvas and a bare table header on the way back.
+  const isUpload = mode === "upload";
+  form.hidden = !isUpload;
+  cameraPanel.hidden = isUpload;
+  // The face-mode selector belongs to the face tab alone; the plate tabs show
+  // no face UI at all.
+  faceControls.hidden = mode !== "face";
+  // Remember which camera tab a later Start should drive.
+  if (!isUpload) {
+    cameraTab = mode;
+  }
+
+  uploadModeButton.setAttribute("aria-pressed", String(mode === "upload"));
+  cameraPlateButton.setAttribute("aria-pressed", String(mode === "plate"));
+  cameraFaceButton.setAttribute("aria-pressed", String(mode === "face"));
+
+  // A result belongs to the tab that produced it. Without this, the last
+  // upload's photo and plate table stay on screen under a live feed, reading
+  // as if they described what the camera is looking at. Cleared in every
+  // direction, since rows are equally stale once any other tab is shown.
   previewPanel.hidden = true;
   results.hidden = true;
   resultsBody.replaceChildren();
   setStatus("");
 
-  // The file input still names a file, so the upload panel should still show
-  // its preview — without boxes, since those results were just discarded.
-  if (!isCamera && loadedImage) {
+  // The file input still names a file, so the upload tab should still show its
+  // preview — without boxes, since those results were just discarded.
+  if (isUpload && loadedImage) {
     drawScene([]);
   }
 }
 
 uploadModeButton.addEventListener("click", () => setMode("upload"));
-cameraModeButton.addEventListener("click", () => setMode("camera"));
+cameraPlateButton.addEventListener("click", () => setMode("plate"));
+cameraFaceButton.addEventListener("click", () => setMode("face"));

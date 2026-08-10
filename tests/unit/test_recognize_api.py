@@ -129,8 +129,50 @@ def test_recognize_returns_one_result_per_detected_plate(
         "province": "ชลบุรี",
         "province_confidence": 1.0,
         "province_candidates": ["ชลบุรี"],
+        "crop_png": None,
     }
     assert body["plates"][1]["box"]["confidence"] == 0.77
+
+
+def test_recognize_omits_the_crop_by_default(
+    client: TestClient,
+    stub_detector: Callable[[Sequence[Detection]], None],
+    stub_ocr: Callable[[str, str], None],
+) -> None:
+    """Without the flag, the response carries no crop so live payloads stay lean."""
+    stub_detector([FIRST_PLATE])
+    stub_ocr("กข 1234", "ชลบุรี")
+
+    body = _post(client).json()
+
+    assert body["plates"][0]["crop_png"] is None
+
+
+def test_recognize_attaches_a_png_crop_when_asked(
+    client: TestClient,
+    stub_detector: Callable[[Sequence[Detection]], None],
+    stub_ocr: Callable[[str, str], None],
+) -> None:
+    """With include_crops, each plate carries its rectified crop as a PNG URI."""
+    stub_detector([FIRST_PLATE])
+    stub_ocr("กข 1234", "ชลบุรี")
+
+    response = client.post(
+        "/recognize?include_crops=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    crop = response.json()["plates"][0]["crop_png"]
+    assert isinstance(crop, str)
+    assert crop.startswith("data:image/png;base64,")
+
+
+def test_openapi_exposes_the_include_crops_parameter(client: TestClient) -> None:
+    """The crop flag is a documented query parameter on /recognize."""
+    schema = client.get("/openapi.json").json()
+    params = schema["paths"]["/recognize"]["post"].get("parameters", [])
+    assert any(p["name"] == "include_crops" for p in params)
 
 
 def test_recognize_recovers_a_damaged_province(

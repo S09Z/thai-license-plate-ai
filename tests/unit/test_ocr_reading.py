@@ -43,6 +43,31 @@ def test_group_into_rows_of_nothing_is_empty() -> None:
     assert group_into_rows([]) == []
 
 
+def test_group_into_rows_does_not_let_a_tall_fragment_bridge_the_row_below() -> None:
+    """A skewed crop must not merge the province into the number row.
+
+    Regression for a real miss: on a perspective-corrected crop the number
+    row's fragments have unequal heights, and a tall one dragged the row's
+    bottom edge down far enough that the province band below overlapped it.
+    Each row is anchored to its topmost fragment, so the row does not grow
+    into the band beneath it. Geometry is the actual observed crop.
+    """
+    fragments = [
+        TextLine(text="4301", confidence=1.0, top=18.0, bottom=71.0, left=123.0),
+        TextLine(text="ดว", confidence=0.74, top=34.0, bottom=84.0, left=49.0),
+        TextLine(
+            text="กรงเทพมหานคร", confidence=0.96, top=63.0, bottom=100.0, left=69.0
+        ),
+    ]
+
+    rows = group_into_rows(fragments)
+
+    assert [[fragment.text for fragment in row] for row in rows] == [
+        ["ดว", "4301"],
+        ["กรงเทพมหานคร"],
+    ]
+
+
 def test_split_reading_joins_fragments_of_the_plate_number() -> None:
     """A plate number split across boxes is rejoined in reading order.
 
