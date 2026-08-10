@@ -186,6 +186,94 @@ def test_detect_faces_mesh_needs_the_landmark_model(
     assert response.status_code == 503
 
 
+def test_detect_faces_fast_rescales_boxes_back_to_source_pixels(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, stub_faces: list[Detection]
+) -> None:
+    """Downscaling the frame must not leak into the coordinates the client sees.
+
+    The 16x8 upload is capped to an 8px longest edge, so detector coordinates
+    arrive in an 8x4 frame and are scaled back by (2, 2) to source pixels.
+    """
+    monkeypatch.setenv("APP_FACE_FAST_MAX_SIZE", "8")
+    get_settings.cache_clear()
+    get_face_detector.cache_clear()
+
+    response = client.post(
+        "/detect/faces?fast=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    (face,) = response.json()["faces"]
+    assert face["box"] == {"x1": 6, "y1": 8, "x2": 26, "y2": 32, "confidence": 0.88}
+
+
+def test_detect_faces_fast_rescales_landmark_points_too(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_faces: list[Detection],
+    stub_landmarks: None,
+) -> None:
+    """Feature points found on the small frame come back in source pixels."""
+    monkeypatch.setenv("APP_FACE_FAST_MAX_SIZE", "8")
+    get_settings.cache_clear()
+    get_face_detector.cache_clear()
+    get_face_landmarker.cache_clear()
+
+    response = client.post(
+        "/detect/faces?fast=true&landmarks=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    (face,) = response.json()["faces"]
+    assert face["landmarks"]["mouth"] == [[14, 26]]
+    assert face["landmarks"]["right_eyebrow"] == [[8, 12]]
+
+
+def test_detect_faces_fast_with_no_cap_leaves_coordinates_alone(
+    client: TestClient, stub_faces: list[Detection]
+) -> None:
+    """Below the cap the fast path passes the frame through unchanged.
+
+    The default cap (480) is larger than a 16px upload, so nothing rescales and
+    the result must be byte-identical to the non-fast request.
+    """
+    base = client.post(
+        "/detect/faces", files={"file": ("scene.png", _png_bytes(), "image/png")}
+    )
+    fast = client.post(
+        "/detect/faces?fast=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert fast.status_code == 200
+    assert fast.json() == base.json()
+
+
+def test_detect_faces_fast_still_rejects_bad_uploads(
+    client: TestClient, stub_faces: list[Detection]
+) -> None:
+    """The fast path does not skip the upload-validation contract."""
+    response = client.post(
+        "/detect/faces?fast=true",
+        files={"file": ("scene.png", b"not an image", "image/png")},
+    )
+
+    assert response.status_code == 400
+
+
+def test_openapi_exposes_the_fast_parameter(client: TestClient) -> None:
+    """The schema advertises ``fast`` so clients can discover the fast path."""
+    schema = client.get("/openapi.json").json()
+    params = {
+        param["name"]
+        for param in schema["paths"]["/detect/faces"]["post"]["parameters"]
+    }
+
+    assert "fast" in params
+
+
 def test_detect_faces_ignores_the_landmark_model_by_default(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

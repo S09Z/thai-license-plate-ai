@@ -38,6 +38,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 10 ✅ | Face detection boxes | `face/`, `app/api/face.py`, `web/static/` | — (opencv's bundled YuNet) | done — `POST /detect/faces`, opt-in overlay beside plate boxes; **17.6ms vs <25ms budget — met (see Part J)** |
 | 11 ✅ | Facial landmarks | `face/landmarks.py`, `app/schemas/face.py`, `web/static/` | — (opencv contrib's Facemark LBF) | done — `?landmarks=true` fits eyebrows/eyes/nose/mouth; **1.1ms per face vs <25ms budget — met (see Part K)** |
 | 12 ✅ | Whole-face mesh | `face/landmarks.py`, `web/static/` | — (opencv's `cv2.Subdiv2D`) | done — `?mesh=true` adds the jaw and a Delaunay wireframe over all 68 points; **0.4ms on top of the fit, 20.1ms serial vs <25ms — met (see Part L)** |
+| 13 ✅ | Fast realtime face boxes | `app/api/face.py`, `app/services/face_service.py`, `web/static/` | — | done — `?fast=true` downsizes server-side before YuNet (720p 18.5ms → 480px 3.2ms, **5.7×**); the camera loop runs plain face boxes at a 16ms (~60fps target) cadence on their own overlay, decoupled from the 200ms plate loop (see Part M) |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -974,3 +975,91 @@ purpose-started process on port 8010, confirmed to be the only listener there.
 5. **Payload grows to ~2.8 KB per meshed face**, versus a few hundred bytes for boxes. Fine at the
    200 ms tick over loopback; unmeasured over a real network, like every latency figure since
    Part I.
+
+---
+
+## Part M — Fast Realtime Face Boxes (✅ shipped 2026-08-07)
+
+Phase 12's face overlay updated at the **200 ms plate cadence** — a box took 1/5 of a second to
+follow a moving face. This phase decouples face boxes from that loop and runs them toward the
+camera's 60 fps rate, by making the per-tick detection cheap enough to run that fast.
+
+**Target: 60 fps.** The 16.7 ms/frame budget is the design goal. Detection on a full 720p frame
+cost 18.5 ms — already over — so the first, load-bearing change is to stop detecting at full size.
+
+### Decisions
+
+- **`?fast=true` downsizes server-side, and every result is scaled back.** The route decodes the
+  upload, shrinks it to a 480px longest edge (`APP_FACE_FAST_MAX_SIZE`), runs YuNet on that, and
+  rescales every box (and any landmark points) into **source-frame pixels** before responding. The
+  client's 1:1 overlay invariant is untouched — no coordinate math moved into the browser, which is
+  the one thing every phase since Part H has deliberately avoided.
+- **A 5.7× speedup that costs nothing to opt out of.** 18.46 ms → **3.22 ms** median on 720p,
+  measured with the real model (`docs/benchmark/face-fast-phase13.md`). The flag is off by default;
+  every existing caller is byte-for-byte unchanged.
+- **Fast is for boxes; features and mesh stay full-resolution.** Landmark and mesh precision is the
+  product there, so the rich modes keep the 200 ms cadence and full-res fit. The control's cadence
+  is per-mode: `boxes` → `FACE_FAST_MS` (16), `features`/`mesh` → `TRACK_INTERVAL_MS` (200).
+- **A separate overlay, so the two cadences never fight.** Faces move to a second transparent
+  canvas (`#face-overlay`) stacked over `#tracking-overlay`. Each loop clears only its own sheet —
+  the face loop redrawing every 16 ms can never erase plate boxes the slower loop just drew. This
+  replaces Phase 10's "one clearRect per tick" invariant with one per overlay per loop.
+- **One face loop, not three.** `faceLoop()` reads the control each tick and picks both the request
+  shape (`?fast` / `?landmarks` / `?mesh`) and the cadence from the mode, so the overlay is never
+  drawn from two loops that could disagree. `trackLoop()` is now plates-only, and its 503 handling
+  is back to the simple "a plate 503 stops the session" — the face step-down moved to `faceLoop()`.
+- **Fast mode does not promise 60 fps, it buys headroom.** 3.22 ms is the detector alone. The
+  browser must still capture, JPEG-encode, round-trip and draw per tick, so the honest claim is "the
+  detector is no longer the bottleneck"; the achieved browser rate is unmeasured (no camera device,
+  carried forward from Parts J–L).
+
+### Measured — `docs/benchmark/face-fast-phase13.md`
+
+| | Median | Budget |
+|---|---|---|
+| Detect, 720p full | 18.46 ms | |
+| **Detect, fast (480px)** | **3.22 ms** | **5.7× speedup** |
+| Fast detection ceiling | 310 fps | 60 fps target |
+
+Reproducible with `make bench-face-fast`.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| Box rescale with `?fast=true` (16×8 upload, 8px cap) | ✅ (3,4,13,16) → (6,8,26,32) — back in source pixels |
+| Landmark points rescaled too | ✅ mouth (7,13) → (14,26) |
+| Below the cap, fast is byte-identical to non-fast | ✅ asserted in tests |
+| Default request unchanged | ✅ existing 11 face-API tests still pass untouched |
+| 415 / 413 / 400 / 503 mapping with `?fast=true` | ✅ (400 against a live server) |
+| OpenAPI exposes `fast` | ✅ `['landmarks', 'mesh', 'fast']` |
+| Live server, real YuNet, `?fast=true` parity | ✅ same empty result as non-fast on a real photo; no crash |
+| Browser: boxes mode → `?fast=true` at ~16ms, no other mode's URL | ✅ static JS review; `node --check` clean |
+| Browser: plates still drawn on the lower overlay | ✅ separate canvases, plate loop untouched |
+| `pytest` / `ruff` / `black` / `mypy` (changed modules) | ✅ **149 passed** (5 new in `test_face_api.py`, 1 restored), all clean |
+
+### Deliberately not built
+
+- **No 60 fps guarantee and no measured browser frame rate.** The 16 ms cadence is the design
+  target; a real number needs a camera, which this environment does not have. The loop
+  self-schedules after each tick, so a slow response stretches the cadence instead of stacking.
+- **No client-side downscaling.** Keeping the full frame in the browser and letting the server
+  downscale preserves the no-coordinate-math invariant. Client-side resize would need the client to
+  rescale boxes back — the exact class of bug every phase since Part H avoided.
+- **No landmark/mesh fast mode.** Downscaled feature points would be visibly coarser where the
+  feature's whole point is precision. The fast flag *works* with them (tests pin the rescale), but
+  no UI path requests that combination.
+- **No change to the upload flow.** `?fast` is a camera-loop optimisation; `/recognize` keeps its
+  own shape.
+
+### ⚠️ Known gaps
+
+1. **No camera device in this environment** — carried forward unchanged from Parts J–L. The fast
+   detection number is the detector on a synthetic frame; achieved browser fps is unmeasured.
+2. **Accuracy at the downscaled size is untested.** The benchmark frame has no face in it. YuNet at
+   480px on a small/distant face may miss — the trade of the fast path, and entirely unmeasured.
+3. **No real face photograph exercised live here.** Unit tests pin the rescale math and the live
+   server check pinned the empty-result parity, but no real face box was produced in this session.
+4. **Frontend verified by static review only.** The split of drawing and the 16 ms cadence were not
+   observed in a browser; the JS is syntax-checked and the control flow reviewed, but live-box
+   behaviour is unverified, consistent with the project's no-JS-test-infra stance.
