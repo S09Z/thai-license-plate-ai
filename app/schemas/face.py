@@ -43,16 +43,42 @@ class FacialLandmarksModel(BaseModel):
     triangles: list[tuple[int, int, int]] | None = None
 
 
+class FaceAttributesModel(BaseModel):
+    """Inferred apparent gender and expression for one face.
+
+    Both fields are gated independently: a label falls back to ``None`` when
+    its winning score is below the configured threshold, but the score itself
+    is always reported so a caller can see how close a call it was. Named to
+    describe the face, not the person: ``expression`` (not "emotion", which a
+    face does not reliably reveal) and ``apparent_gender`` (a visual-presentation
+    classifier, not a determination of sex).
+
+    Attributes:
+        expression: One of the seven FER labels, or ``None`` when abstained.
+        expression_confidence: The winning expression score, always reported.
+        apparent_gender: ``"male"`` or ``"female"``, or ``None`` when abstained.
+        apparent_gender_confidence: The winning gender score, always reported.
+    """
+
+    expression: str | None = None
+    expression_confidence: float
+    apparent_gender: str | None = None
+    apparent_gender_confidence: float
+
+
 class Face(BaseModel):
     """One detected face and, when requested, its feature points.
 
     Attributes:
         box: Where the face sits in the frame.
         landmarks: Feature points, or ``None`` when they were not requested.
+        attributes: Inferred expression and apparent gender, or ``None`` when
+            ``attributes`` was not requested.
     """
 
     box: BoundingBox
     landmarks: FacialLandmarksModel | None = None
+    attributes: FaceAttributesModel | None = None
 
 
 class FaceResponse(BaseModel):
