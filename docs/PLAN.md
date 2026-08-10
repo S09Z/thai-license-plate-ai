@@ -27,8 +27,8 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 |------|-------|-------------|----------|---------------------|
 | 0 ✅ | API skeleton + health | `app/` | fastapi, pydantic | done, suite green |
 | 1 ✅ | Detection | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | done — `POST /detect` returns boxes; uploads validated; latency unmeasured (no trained weights yet) |
-| **2** | **Perspective correction** (next) | `detector/pipelines/` or `app/services/` | (opencv) | box → deskewed plate crop; unit-tested on synthetic warp |
-| 3 | OCR | `ocr/`, `app/api/` | paddleocr | crop → raw text + province candidates; <40ms |
+| 2 ✅ | Perspective correction | `detector/pipelines/perspective.py` | (opencv) | done — box → deskewed crop; synthetic-warp tested; 0.32ms median |
+| **3** | **OCR** (next) | `ocr/`, `app/api/` | paddleocr | crop → raw text + province candidates; <40ms |
 | 4 | Post-processing | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
 | 5 | RAG validation | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
 | 6 | Full `/recognize` | `app/api/recognize.py` | — | chains 1→5, one JSON response; total <100ms budget checked |
@@ -107,3 +107,35 @@ process-cached `PlateDetector` (built from `get_settings()`), maps model output 
 3. `poetry run ruff check .` / `poetry run black --check .` / `poetry run mypy app detector` — clean.
 4. Manual: `poetry run uvicorn app.main:app` then `curl -F "file=@sample.png" localhost:8000/detect`
    → JSON boxes (needs a real weights file); bad upload → 415/400.
+
+---
+
+## Part C — Perspective Correction Slice (✅ shipped 2026-07-31)
+
+**Goal:** a detection box is axis-aligned, so a plate shot at an angle stays skewed inside it.
+Recover the plate's quadrilateral and warp it flat, ready for OCR.
+
+**Module:** `detector/pipelines/perspective.py` — library only, no endpoint. Phase 3 (OCR) is the
+first consumer; Phase 6 chains it into `/recognize`.
+
+| Function | Role |
+|---|---|
+| `order_corners(points)` | 4 points → TL, TR, BR, BL via coordinate sum/difference. Pure. |
+| `find_plate_quad(crop)` | Canny → contours → `approxPolyDP`; largest 4-sided contour covering ≥20% of the crop. `None` when absent. |
+| `warp_plate(image, quad, size)` | `getPerspectiveTransform` + `warpPerspective` onto a fixed rectangle. |
+| `correct_perspective(image, box, ...)` | Orchestrates: pad 4% → clamp to image → crop → find quad → warp. |
+
+### Decisions
+- **Fallback, not failure.** When no quadrilateral is found, the padded crop is returned resized.
+  A skewed crop still reaches OCR; refusing to produce one would drop the plate entirely.
+- **No new `Settings` fields.** `output_size` and `padding` are keyword arguments with defaults.
+  Nothing in the API surface consumes them yet, so config plumbing would be speculative — add it
+  in Phase 6 when `/recognize` needs to tune them.
+- **`output_size` default `(256, 128)` is a placeholder**, not a measured Thai-plate ratio. Thai
+  plates carry two lines (number above, province below); calibrate against real data in Phase 3.
+
+### Measured
+- 8 unit tests, suite total 22 green; ruff/black/mypy clean.
+- Synthetic-warp recovery: MAE **8.5** vs true plate, against **68.9** for an uncorrected crop.
+- Latency on a 720p frame with a 435×176 box: median **0.32 ms**, p95 0.52 ms — negligible
+  against the 100ms total budget.
