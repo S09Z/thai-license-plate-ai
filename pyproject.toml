@@ -17,6 +17,8 @@ dependencies = [
     "opencv-python-headless (>=4.10.0,<4.11.0)",
     "numpy (>=1.26.0,<2.0.0)",
     "pillow (>=10.2.0,<11.0.0)",
+    "paddleocr (>=3.7.0,<4.0.0)",
+    "paddlepaddle (>=3.3.1,<4.0.0)",
 ]
 
 
@@ -70,8 +72,8 @@ warn_return_any = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-# Ultralytics ships no type information.
-module = ["ultralytics.*"]
+# Neither Ultralytics nor PaddleOCR ships type information.
+module = ["ultralytics.*", "paddleocr.*"]
 ignore_missing_imports = true
 
 

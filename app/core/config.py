@@ -17,6 +17,8 @@ class Settings(BaseSettings):
         detector_conf_threshold: Minimum confidence for a kept detection.
         max_upload_bytes: Largest accepted image upload, in bytes.
         allowed_image_types: Content types accepted by image endpoints.
+        ocr_lang: PaddleOCR language code used for recognition.
+        ocr_min_confidence: Recognized lines below this score are discarded.
     """
 
     model_config = SettingsConfigDict(
@@ -35,6 +37,9 @@ class Settings(BaseSettings):
     detector_conf_threshold: float = 0.25
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_image_types: tuple[str, ...] = ("image/jpeg", "image/png")
+
+    ocr_lang: str = "th"
+    ocr_min_confidence: float = 0.5
 
 
 @lru_cache
