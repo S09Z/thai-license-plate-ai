@@ -29,6 +29,12 @@ class Settings(BaseSettings):
         allowed_image_types: Content types accepted by image endpoints.
         ocr_lang: PaddleOCR language code used for recognition.
         ocr_min_confidence: Recognized lines below this score are discarded.
+        ocr_det_limit_side_len: Longest edge, in pixels, PaddleOCR's text
+            detector resizes the crop to before detection. The detector (DBNet)
+            dominates OCR latency; capping this below the crop's 256px width
+            downscales the detector's input and cuts its cost.
+        ocr_det_limit_type: Which edge ``ocr_det_limit_side_len`` bounds;
+            ``"max"`` caps the longest edge so the small crop is downscaled.
         plate_crop_width: Width of the rectified plate crop handed to OCR.
         plate_crop_height: Height of the rectified plate crop handed to OCR.
         plate_crop_padding: Fraction of box size the crop is expanded by.
@@ -63,6 +69,12 @@ class Settings(BaseSettings):
 
     ocr_lang: str = "th"
     ocr_min_confidence: float = 0.5
+    # PaddleOCR's DBNet text detector is ~90% of OCR latency and runs on the
+    # crop's long edge. Capping it at 192px (below the 256px crop width) cut OCR
+    # ~28% with no change to plate/CER/province accuracy on the real-plate eval
+    # set (Phase 15b, docs/benchmark/recognize-latency-phase15b.md).
+    ocr_det_limit_side_len: int = 192
+    ocr_det_limit_type: str = "max"
 
     # A placeholder ratio, not a measured Thai-plate one. Exposed here so it
     # can be calibrated against real photographs without a code change.

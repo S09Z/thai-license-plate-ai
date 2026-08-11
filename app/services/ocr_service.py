@@ -20,6 +20,8 @@ def get_recognizer() -> PlateOCR:
     return PlateOCR(
         lang=settings.ocr_lang,
         min_confidence=settings.ocr_min_confidence,
+        det_limit_side_len=settings.ocr_det_limit_side_len,
+        det_limit_type=settings.ocr_det_limit_type,
     )
 
 
