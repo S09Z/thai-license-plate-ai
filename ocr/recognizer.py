@@ -14,7 +14,7 @@ from ocr.reading import TextLine
 logger = logging.getLogger(__name__)
 
 
-def _load_paddleocr(lang: str) -> Any:
+def _load_paddleocr(lang: str, det_limit_side_len: int, det_limit_type: str) -> Any:
     """Build a PaddleOCR engine for a language.
 
     Imported lazily so that merely importing this module does not pull in the
@@ -26,11 +26,18 @@ def _load_paddleocr(lang: str) -> Any:
     halved latency (915 ms -> 468 ms) and *improved* accuracy, since the
     orientation classifier corrupted upscaled crops.
 
+    ``det_limit_side_len``/``det_limit_type`` bound the size PaddleOCR's text
+    detector resizes the crop to. That detector dominates OCR latency, so
+    capping the crop's long edge below its width downscales the detector's
+    input and cuts its cost (Phase 15b).
+
     No ``*_model_name`` is passed on purpose: supplying one makes PaddleOCR
     ignore ``lang`` and silently fall back to a non-Thai recognizer.
 
     Args:
         lang: PaddleOCR language code (``"th"`` for Thai).
+        det_limit_side_len: Pixel bound the text detector resizes the crop to.
+        det_limit_type: Which edge the bound applies to (``"max"`` or ``"min"``).
 
     Returns:
         The constructed PaddleOCR pipeline. Weights are downloaded to
@@ -43,21 +50,37 @@ def _load_paddleocr(lang: str) -> Any:
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=False,
+        text_det_limit_side_len=det_limit_side_len,
+        text_det_limit_type=det_limit_type,
     )
 
 
 class PlateOCR:
     """Recognizes text lines in a rectified plate crop."""
 
-    def __init__(self, lang: str, min_confidence: float) -> None:
+    def __init__(
+        self,
+        lang: str,
+        min_confidence: float,
+        det_limit_side_len: int = 192,
+        det_limit_type: str = "max",
+    ) -> None:
         """Configure the recognizer without loading the engine.
+
+        The detection-limit defaults mirror :class:`~app.core.config.Settings`'
+        safe values; the app passes its configured values explicitly.
 
         Args:
             lang: PaddleOCR language code.
             min_confidence: Lines scoring below this are discarded.
+            det_limit_side_len: Pixel bound the text detector resizes the crop
+                to; smaller trades a little accuracy for lower latency.
+            det_limit_type: Which edge the bound applies to (``"max"``/``"min"``).
         """
         self._lang = lang
         self._min_confidence = min_confidence
+        self._det_limit_side_len = det_limit_side_len
+        self._det_limit_type = det_limit_type
         self._engine: Any | None = None
 
     def recognize(self, crop: np.ndarray) -> list[TextLine]:
@@ -74,7 +97,9 @@ class PlateOCR:
         """
         if self._engine is None:
             logger.info("loading OCR engine", extra={"lang": self._lang})
-            self._engine = _load_paddleocr(self._lang)
+            self._engine = _load_paddleocr(
+                self._lang, self._det_limit_side_len, self._det_limit_type
+            )
 
         lines: list[TextLine] = []
         for result in self._engine.predict(crop):

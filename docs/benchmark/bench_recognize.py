@@ -103,7 +103,10 @@ def main() -> None:
     settings = Settings()
     scene = render_scene()
     recognizer = PlateOCR(
-        lang=settings.ocr_lang, min_confidence=settings.ocr_min_confidence
+        lang=settings.ocr_lang,
+        min_confidence=settings.ocr_min_confidence,
+        det_limit_side_len=settings.ocr_det_limit_side_len,
+        det_limit_type=settings.ocr_det_limit_type,
     )
     crop_size = (settings.plate_crop_width, settings.plate_crop_height)
 

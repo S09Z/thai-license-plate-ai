@@ -48,7 +48,9 @@ def test_recognize_maps_engine_output_to_text_lines(
             }
         ]
     )
-    monkeypatch.setattr(recognizer_module, "_load_paddleocr", lambda _lang: engine)
+    monkeypatch.setattr(
+        recognizer_module, "_load_paddleocr", lambda *args, **kwargs: engine
+    )
 
     lines = PlateOCR(lang="th", min_confidence=0.3).recognize(crop)
 
@@ -71,7 +73,9 @@ def test_recognize_carries_box_geometry_from_polygons(
             }
         ]
     )
-    monkeypatch.setattr(recognizer_module, "_load_paddleocr", lambda _lang: engine)
+    monkeypatch.setattr(
+        recognizer_module, "_load_paddleocr", lambda *args, **kwargs: engine
+    )
 
     (line,) = PlateOCR(lang="th", min_confidence=0.3).recognize(crop)
 
@@ -91,7 +95,9 @@ def test_recognize_drops_lines_below_min_confidence(
             }
         ]
     )
-    monkeypatch.setattr(recognizer_module, "_load_paddleocr", lambda _lang: engine)
+    monkeypatch.setattr(
+        recognizer_module, "_load_paddleocr", lambda *args, **kwargs: engine
+    )
 
     lines = PlateOCR(lang="th", min_confidence=0.5).recognize(crop)
 
@@ -103,7 +109,9 @@ def test_recognize_returns_nothing_when_engine_finds_no_text(
 ) -> None:
     """An empty recognition result is not an error."""
     engine = _FakeEngine([{"rec_texts": [], "rec_scores": [], "rec_polys": []}])
-    monkeypatch.setattr(recognizer_module, "_load_paddleocr", lambda _lang: engine)
+    monkeypatch.setattr(
+        recognizer_module, "_load_paddleocr", lambda *args, **kwargs: engine
+    )
 
     assert PlateOCR(lang="th", min_confidence=0.3).recognize(crop) == []
 
@@ -113,7 +121,9 @@ def test_recognize_tolerates_result_without_recognition_keys(
 ) -> None:
     """A result carrying no recognition fields yields no lines."""
     engine = _FakeEngine([{}])
-    monkeypatch.setattr(recognizer_module, "_load_paddleocr", lambda _lang: engine)
+    monkeypatch.setattr(
+        recognizer_module, "_load_paddleocr", lambda *args, **kwargs: engine
+    )
 
     assert PlateOCR(lang="th", min_confidence=0.3).recognize(crop) == []
 
@@ -136,13 +146,15 @@ def test_load_paddleocr_skips_submodels_a_plate_crop_does_not_need(
         sys.modules, "paddleocr", SimpleNamespace(PaddleOCR=_FakePaddleOCR)
     )
 
-    recognizer_module._load_paddleocr("th")
+    recognizer_module._load_paddleocr("th", 192, "max")
 
     assert captured == {
         "lang": "th",
         "use_doc_orientation_classify": False,
         "use_doc_unwarping": False,
         "use_textline_orientation": False,
+        "text_det_limit_side_len": 192,
+        "text_det_limit_type": "max",
     }
 
 
@@ -152,7 +164,9 @@ def test_engine_is_loaded_once_with_configured_language(
     """Weights load lazily on first use, with the configured language."""
     langs: list[str] = []
 
-    def _fake_load(lang: str) -> _FakeEngine:
+    def _fake_load(
+        lang: str, det_limit_side_len: int, det_limit_type: str
+    ) -> _FakeEngine:
         langs.append(lang)
         return _FakeEngine([{"rec_texts": [], "rec_scores": [], "rec_polys": []}])
 
@@ -165,3 +179,27 @@ def test_engine_is_loaded_once_with_configured_language(
     plate_ocr.recognize(crop)
 
     assert langs == ["th"]
+
+
+def test_detection_limit_is_forwarded_to_the_engine(
+    monkeypatch: pytest.MonkeyPatch, crop: np.ndarray
+) -> None:
+    """The configured detection-input cap reaches ``_load_paddleocr``."""
+    calls: list[tuple[str, int, str]] = []
+
+    def _fake_load(
+        lang: str, det_limit_side_len: int, det_limit_type: str
+    ) -> _FakeEngine:
+        calls.append((lang, det_limit_side_len, det_limit_type))
+        return _FakeEngine([{"rec_texts": [], "rec_scores": [], "rec_polys": []}])
+
+    monkeypatch.setattr(recognizer_module, "_load_paddleocr", _fake_load)
+
+    PlateOCR(
+        lang="th",
+        min_confidence=0.3,
+        det_limit_side_len=160,
+        det_limit_type="max",
+    ).recognize(crop)
+
+    assert calls == [("th", 160, "max")]

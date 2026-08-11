@@ -58,6 +58,9 @@ bench-recognize:
 bench-recognize-accuracy:
 	poetry run python docs/benchmark/bench_recognize_accuracy.py
 
+bench-recognize-latency:
+	poetry run python docs/benchmark/bench_recognize_latency.py
+
 bench-detect:
 	poetry run python docs/benchmark/bench_detect.py
 

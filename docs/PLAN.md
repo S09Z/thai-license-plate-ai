@@ -41,6 +41,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 13 ✅ | Fast realtime face boxes | `app/api/face.py`, `app/services/face_service.py`, `web/static/` | — | done — `?fast=true` downsizes server-side before YuNet (720p 18.5ms → 480px 3.2ms, **5.7×**); the camera loop runs plain face boxes at a 16ms (~60fps target) cadence on their own overlay, decoupled from the 200ms plate loop (see Part M) |
 | 14 ✅ | Face attributes (expression + apparent gender) | `face/attributes.py`, `app/services/face_service.py`, `web/static/` | — (opencv's `cv2.dnn`) | done — `?attributes=true` labels each face via Levi-Hassner gender (Caffe) + OpenCV Zoo expression (ONNX); infer-render-discard, weights hash-pinned in the Makefile; **~18.6ms/face inference vs <25ms — met, but off the fast path (see Part N)** |
 | 15a ✅ | Plate accuracy + UI (3 tabs, rectified crop) | `ocr/reading.py`, `eval/`, `app/services/recognize_service.py`, `web/static/` | — | done — first real-plate accuracy harness (`make bench-recognize-accuracy`): **exact-match 77.3%, CER 0.153→0.063, province 90.9%→95.5%** after a row-grouping fix; UI split into upload / live-plate / live-face tabs; upload table shows the rectified crop (`?include_crops=true`). Latency deferred to 15b (see Part O) |
+| 15b ✅ | OCR latency: measure + safe win | `app/core/config.py`, `ocr/recognizer.py`, `app/services/ocr_service.py`, `docs/benchmark/` | — | done — first real-plate latency harness (`make bench-recognize-latency`): pipeline **~286ms (2.9× over <100ms)**, OCR ~91% of it, of which text **detection ~79%**. Capping the detector input (`text_det_limit=max/192`) cut OCR **~28%** with **identical accuracy** (77.3/0.063/95.5); skip-detection rejected (regresses province); `<100ms` needs an ONNX/GPU slice (see Part P) |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -1245,3 +1246,75 @@ note. So 15a became *measure + fix the weak cases*, not *make it work*.
    generalization to other cameras/provinces is unmeasured.
 3. **Live camera tabs unverified against a device** — no camera here; only the upload tab and tab
    switching were exercised in a browser.
+
+## Part P — OCR Latency: measure, safe win, honest bottleneck (✅ shipped 2026-08-11, Phase 15b)
+
+Phase 15a deferred latency to 15b. `/recognize` on real plates was ~286 ms
+(2.9× the `<100 ms` budget), essentially all of it OCR. This phase measures
+where that time goes, lands the one accuracy-preserving win available, and
+documents — with evidence — why the budget needs a runtime/model change rather
+than more config tuning. Numbers: `docs/benchmark/recognize-latency-phase15b.md`
+(`make bench-recognize-latency`).
+
+### The finding that reframed the phase
+
+`ocr-phase3.md` named the biggest win as *"skip text detection — the crop is
+pre-rectified, only the recognition head is needed."* Measured on real plates,
+that is **wrong**: PaddleOCR's DBNet text detector is ~79% of OCR latency **but
+is doing accuracy-critical work**. Recognition-only with a hand-rolled line
+segmenter craters accuracy — province (15a's hard-won 95.5%) drops to 54–77%,
+because a projection profile can't localize low-contrast colored province text
+or handle variable layouts the way the learned detector does. So, like 15a,
+the phase became *measure + land the safe win*, not *chase the theoretical one*.
+
+### Decisions
+
+- **Skip-detection rejected on evidence, not shipped.** Two throwaway
+  experiments (Otsu split, fixed geometric bands) proved it trades away 15a's
+  accuracy for latency the budget still misses. Kept only as a documented
+  decision record.
+- **The safe win: cap the text detector's input.** The crop is 256 px wide;
+  PaddleOCR still resizes it before DBNet. Capping the long edge at 192 px
+  (`text_det_limit=max/192`) downscales the detector's input and cuts OCR ~28%
+  (~389 → ~280 ms/crop) with **all three accuracy metrics identical to
+  baseline** on the eval set (77.3% / 0.063 / 95.5%). `max/160` is faster but
+  regresses province (→ 90.9%), so it fails the zero-loss bar; `max/192` is the
+  safest point on the frontier.
+- **Config-driven, no new dependency.** New `Settings.ocr_det_limit_side_len`
+  (192) and `ocr_det_limit_type` ("max"), threaded through
+  `PlateOCR`/`_load_paddleocr`; `get_recognizer` passes them as the source of
+  truth. Tunable per deployment without code changes.
+- **`<100 ms` needs ONNX/GPU — deferred as a scoped slice.** Even after the
+  knob, OCR is ~260 ms of inherently-expensive CPU DBNet. Closing the gap needs
+  ONNX Runtime/OpenVINO export (same weights, +2 deps, provenance to verify),
+  GPU (none here), or a lighter/quantized detector — guided by the new
+  benchmark, not assumption.
+
+### Verified
+
+- Full gate green: **167 tests, ruff, black, mypy** (+1 test over 15a's 166:
+  `PlateOCR` forwards its detection cap to the engine).
+- Accuracy **unchanged** through the shipped path: real-plate bench still 77.3%
+  exact / 0.063 CER / 95.5% province, same 5 misses.
+- New `bench_recognize_latency.py` runs the real detector + perspective + OCR +
+  post/RAG over the 22 eval images and reports per-stage medians + the
+  det-vs-rec decomposition.
+
+### Deliberately not built
+
+- **ONNX/OpenVINO path** — the real route to `<100 ms`, but a larger slice with
+  new deps and provenance work; scoped for later.
+- **Fast OCR flag for the camera loop** — a rec-only `?fast` path (~110 ms but
+  ~59% exact) was considered and rejected; its accuracy is too poor to expose.
+- **Detector/recognizer retraining** — the remaining OCR character errors are
+  model-level, out of a latency phase.
+
+### ⚠️ Known gaps
+
+1. **Latency still ~2.9× over budget.** The safe knob helps ~28%; the DBNet
+   detector remains the wall. `<100 ms` is unmet pending the ONNX/GPU slice.
+2. **`max/192` "identical accuracy" is eval-set-specific (22 images).** Exact on
+   this set, not a generalization guarantee; re-run the sweep before lowering
+   the cap for a new camera population.
+3. **Machine-specific absolute ms.** Apple Silicon, CPU only; the durable
+   finding is the *ratios* (detection ≫ recognition; OCR ≫ every other stage).
