@@ -28,8 +28,8 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 0 ✅ | API skeleton + health | `app/` | fastapi, pydantic | done, suite green |
 | 1 ✅ | Detection | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | done — `POST /detect` returns boxes; uploads validated; latency unmeasured (no trained weights yet) |
 | 2 ✅ | Perspective correction | `detector/pipelines/perspective.py` | (opencv) | done — box → deskewed crop; synthetic-warp tested; 0.32ms median |
-| **3** | **OCR** (next) | `ocr/`, `app/api/` | paddleocr | crop → raw text + province candidates; <40ms |
-| 4 | Post-processing | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
+| 3 ✅ | OCR | `ocr/`, `app/api/ocr.py` | paddleocr, paddlepaddle | done — `POST /ocr` returns plate text + province candidates; **394ms vs <40ms budget (see Part D)** |
+| **4** | **Post-processing** (next) | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
 | 5 | RAG validation | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
 | 6 | Full `/recognize` | `app/api/recognize.py` | — | chains 1→5, one JSON response; total <100ms budget checked |
 | 7 | Web UI | `web/templates`, `web/static` | (jinja2/gradio TBD) | upload image → view boxed result + text |
@@ -139,3 +139,62 @@ first consumer; Phase 6 chains it into `/recognize`.
 - Synthetic-warp recovery: MAE **8.5** vs true plate, against **68.9** for an uncorrected crop.
 - Latency on a 720p frame with a 435×176 box: median **0.32 ms**, p95 0.52 ms — negligible
   against the 100ms total budget.
+
+---
+
+## Part D — OCR Slice (✅ shipped 2026-07-31)
+
+**Goal:** a rectified plate crop → plate number text + province candidates, exposed as `POST /ocr`.
+
+**Modules:** `ocr/reading.py` (engine-free data + row logic), `ocr/recognizer.py` (PaddleOCR
+adapter), `app/schemas/ocr.py`, `app/services/ocr_service.py`, `app/api/ocr.py`.
+
+Province *resolution* is deliberately out of scope: `/ocr` reports candidates verbatim and
+Phase 5 (RAG) matches them against the province list. Recognized text is never interpreted or
+executed, per the security rule in `CLAUDE.md`.
+
+### Decisions
+- **`ocr/reading.py` holds no engine import.** All row/line logic is pure data, so the whole
+  suite runs with no model weights and no network. `_load_paddleocr` is a module-level function
+  purely so tests can patch it.
+- **Fragments, not lines.** PaddleOCR returns one box per *fragment*, not per visual line — it
+  split `กข 1234` into two boxes. `TextLine` therefore carries `top`/`bottom`/`left`, and
+  `group_into_rows` reassembles rows by vertical overlap (≥50% of the shorter box), ordering
+  fragments left-to-right within a row. Discovered by running the real engine, not by design.
+- **Topmost row = plate number**, every row below = province candidate.
+- **Row confidence is the weakest fragment's**, not the mean — a joined row is only as
+  trustworthy as its least certain part.
+- **Preprocessing submodels disabled** (`use_doc_orientation_classify`, `use_doc_unwarping`,
+  `use_textline_orientation`). Crops arriving here are already detected and rectified.
+- **No `*_model_name` override.** Passing one makes PaddleOCR ignore `lang` and silently fall
+  back to a non-Thai recognizer — it turned `กข` into `∩U` during benchmarking.
+- **`lines` stays at fragment granularity in the response**, so a client can see what the engine
+  actually saw before rows were joined.
+
+### Measured (synthetic 256×128 Thai plate, Thonburi, CPU / Apple Silicon)
+| | default pipeline | submodels disabled (shipped) |
+|---|---|---|
+| `plate_text` | `กข 1234` @ 0.995 | `กข 1234` @ 1.000 |
+| province | `ชลบร 9` | `ชลบรดี` |
+| warm median | 915 ms | **394 ms** (n=15, `docs/benchmark/`) |
+| at 3× upscale | collapses to `VEZL` | still correct |
+
+- 14 unit tests for this slice, suite total **42 green**; ruff/black/mypy clean.
+- Cold start (first recognition, weights load): ~4.7 s.
+- Reproducible: `poetry run python docs/benchmark/bench_ocr.py`; result recorded in
+  `docs/benchmark/ocr-phase3.md`. An earlier figure of 589 ms (n=5, measured under load) appears
+  in the Phase 3 commit message and PR body and is superseded by 394 ms (n=15).
+
+### ⚠️ Open issues carried forward
+1. **Latency misses the budget by ~10×** — 394 ms measured against `<40 ms` in `CLAUDE.md`.
+   The OCR stage alone exceeds the whole-pipeline `<100 ms` budget by ~4×.
+   Untried levers: ONNX/OpenVINO export, quantization, batching, GPU, or skipping text
+   *detection* entirely (a rectified crop has known line positions — likely the largest single
+   win). **The performance budget is currently aspirational, not met.** Revisit in Phase 6 when
+   the full pipeline is assembled.
+2. **Thai vowel/tone marks are dropped** — `ชลบุรี` read as `ชลบร`/`ชลบรดี`. The consonant
+   skeleton survives, so Phase 5 fuzzy-matching against the 77-province list should recover it;
+   this is the main reason province resolution is deferred rather than attempted here.
+3. **Evidence is synthetic.** All numbers above come from rendered text, not photographs. Nothing
+   here is validated against a real Thai plate; treat accuracy claims as provisional until a real
+   dataset exists.
