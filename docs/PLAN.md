@@ -29,14 +29,16 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 1 ✅ | Detection | `detector/`, `app/api/detection.py` | ultralytics(+torch), opencv, numpy, pillow | done — `POST /detect` returns boxes; uploads validated; latency unmeasured (no trained weights yet) |
 | 2 ✅ | Perspective correction | `detector/pipelines/perspective.py` | (opencv) | done — box → deskewed crop; synthetic-warp tested; 0.32ms median |
 | 3 ✅ | OCR | `ocr/`, `app/api/ocr.py` | paddleocr, paddlepaddle | done — `POST /ocr` returns plate text + province candidates; **394ms vs <40ms budget (see Part D)** |
-| **4** | **Post-processing** (next) | `app/services/`, `app/utils/` | — | normalize plate format, map province; pure-function tests |
-| 5 | RAG validation | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
+| 4 ✅ | Post-processing | `postprocess/` | — | done — plate normalized, province mapped deterministically; 14 pure-function tests |
+| **5** | **RAG validation** (next) | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
 | 6 | Full `/recognize` | `app/api/recognize.py` | — | chains 1→5, one JSON response; total <100ms budget checked |
 | 7 | Web UI | `web/templates`, `web/static` | (jinja2/gradio TBD) | upload image → view boxed result + text |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
-version/dataset/metrics/git-commit (CLAUDE.md Model Rules); experiment log under `docs/experiments/`;
-latency benchmark under `docs/benchmark/`. Deferred until Phase 3+ to avoid speculative infrastructure.
+version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred, no trained weights
+exist yet**; experiment log under `docs/experiments/` — **still deferred**; latency benchmark under
+`docs/benchmark/` — **✅ landed in Phase 3** (`bench_ocr.py` + `ocr-phase3.md`), the pattern to
+follow when later stages need numbers.
 
 ---
 
@@ -198,3 +200,49 @@ executed, per the security rule in `CLAUDE.md`.
 3. **Evidence is synthetic.** All numbers above come from rendered text, not photographs. Nothing
    here is validated against a real Thai plate; treat accuracy claims as provisional until a real
    dataset exists.
+
+---
+
+## Part E — Post-Processing Slice (✅ shipped 2026-07-31)
+
+Turns raw OCR text into canonical fields. Pure functions: no engine, no I/O, no settings.
+
+### Modules
+- `postprocess/thai.py` — `strip_thai_marks`, the shared primitive. Removes Thai combining vowel
+  and tone marks; deliberately keeps base and spacing vowels (เ แ โ ใ ไ ำ), which survive
+  recognition and carry real identity.
+- `postprocess/plate.py` — `normalize_plate_text` → `NormalizedPlate(text, letters, digits,
+  is_well_formed)`. Strips separators and stray marks, then matches
+  `^(\d?[ก-ฮ]{1,3})(\d{1,4})$` — an optional leading digit (post-2012 plates), 1–3 consonants,
+  1–4 digits.
+- `postprocess/provinces.py` — `THAI_PROVINCES` (all 77) and `match_province`.
+
+### Decisions
+- **Library only, no endpoint.** Follows the Phase 2 precedent. Phase 6 is the first consumer;
+  adding a `/postprocess` route or a service wrapper now would be speculative. This is a
+  deliberate deviation from the Part A row, which named `app/services/`, `app/utils/`.
+- **New `postprocess/` package rather than `app/utils/`.** Domain logic and a 77-row data table
+  belong beside `ocr/` and `detector/`, not in the web layer next to upload validation.
+- **Never coerce a misread.** Text failing the pattern is returned verbatim with
+  `is_well_formed=False`. A confidently wrong plate number is worse than an admitted failure.
+- **Matching is mark-insensitive but otherwise exact.** `match_province` returns `None` rather
+  than guessing at a close candidate. Fuzzy recovery is Phase 5's job, by design.
+
+### Verified
+| Behaviour | Result |
+|---|---|
+| `'กข1234'` → canonical | `'กข 1234'`, well formed |
+| `'1กข2345'` → modern prefix kept | `'1กข 2345'`, well formed |
+| `'VEZL'` (real Phase 3 misread) | returned verbatim, **not** well formed |
+| `'ชลบร'` (marks dropped) | → `'ชลบุรี'` |
+| `'ชลบุรี'` (clean) | → `'ชลบุรี'` |
+| Mark-stripping collisions across all 77 | **none** — asserted by test |
+
+14 new tests; suite now 56 green. Ruff, Black, MyPy clean (`mypy app detector ocr postprocess`).
+
+### ⚠️ Known gap
+`'ชลบรดี'` — what Phase 3 OCR *actually* produces for ชลบุรี — still returns `None`. The
+recognizer both drops marks and hallucinates a trailing `ดี`, and deterministic matching
+correctly refuses it. **Province resolution on real OCR output does not work yet**; that is
+precisely the case Phase 5 exists to handle. Do not report province mapping as working
+end-to-end until then.
