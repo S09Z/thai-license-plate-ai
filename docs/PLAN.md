@@ -30,14 +30,14 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 2 ✅ | Perspective correction | `detector/pipelines/perspective.py` | (opencv) | done — box → deskewed crop; synthetic-warp tested; 0.32ms median |
 | 3 ✅ | OCR | `ocr/`, `app/api/ocr.py` | paddleocr, paddlepaddle | done — `POST /ocr` returns plate text + province candidates; **394ms vs <40ms budget (see Part D)** |
 | 4 ✅ | Post-processing | `postprocess/` | — | done — plate normalized, province mapped deterministically; 14 pure-function tests |
-| **5** | **RAG validation** (next) | `rag/`, `app/services/` | chromadb, sentence-transformers | correct OCR against province/plate KB; <15ms |
-| 6 | Full `/recognize` | `app/api/recognize.py` | — | chains 1→5, one JSON response; total <100ms budget checked |
-| 7 | Web UI | `web/templates`, `web/static` | (jinja2/gradio TBD) | upload image → view boxed result + text |
+| 5 ✅ | RAG validation | `rag/` | ~~chromadb, sentence-transformers~~ **none** (see Part F) | done — `ชลบรดี` → `ชลบุรี`; 0 mis-attributions over 231 degraded candidates; **0.44ms vs <15ms budget — met** |
+| 6 ✅ | Full `/recognize` | `app/api/recognize.py`, `app/services/recognize_service.py` | — | done — chains 1→5, one JSON response per plate; **412ms lower bound vs <100ms budget — 4.1× over (see Part G)** |
+| **7** | **Web UI** (next) | `web/templates`, `web/static` | (jinja2/gradio TBD) | upload image → view boxed result + text |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred, no trained weights
 exist yet**; experiment log under `docs/experiments/` — **still deferred**; latency benchmark under
-`docs/benchmark/` — **✅ landed in Phase 3** (`bench_ocr.py` + `ocr-phase3.md`), the pattern to
+`docs/benchmark/` — **✅ landed in Phase 3** (`bench_ocr.py` + `ocr-phase3.md`), extended in Phase 5 (`bench_rag.py` + `rag-phase5.md`), the pattern to
 follow when later stages need numbers.
 
 ---
@@ -240,9 +240,175 @@ Turns raw OCR text into canonical fields. Pure functions: no engine, no I/O, no 
 
 14 new tests; suite now 56 green. Ruff, Black, MyPy clean (`mypy app detector ocr postprocess`).
 
-### ⚠️ Known gap
+### ⚠️ Known gap — ✅ closed by Phase 5
 `'ชลบรดี'` — what Phase 3 OCR *actually* produces for ชลบุรี — still returns `None`. The
 recognizer both drops marks and hallucinates a trailing `ดี`, and deterministic matching
 correctly refuses it. **Province resolution on real OCR output does not work yet**; that is
 precisely the case Phase 5 exists to handle. Do not report province mapping as working
 end-to-end until then.
+
+*(Phase 5 closes this: `rag.validator.correct_province('ชลบรดี')` → `ชลบุรี`. The Phase 4
+behaviour above is unchanged and still correct — deterministic matching still refuses to
+guess; the guessing is now done deliberately, elsewhere, with guards. See Part F.)*
+
+---
+
+## Part F — RAG Validation Slice (✅ shipped 2026-07-31)
+
+**Goal:** recover a province name the recognizer damaged, without ever inventing one.
+
+**Modules:** `rag/similarity.py` (edit distance, pure), `rag/validator.py` (knowledge base +
+thresholds + `correct_province` / `resolve_province`). Library only, no endpoint — Phase 2 and
+Phase 4 precedent; Phase 6 is the first consumer.
+
+### The dependency decision — deviation from Part A
+
+Part A named **chromadb + sentence-transformers**. Both were dropped. This is the largest
+deviation from the plan so far, so the reasoning is recorded in full:
+
+- **The knowledge base is 77 static proper nouns.** A vector store exists to make similarity
+  search over large corpora tractable. At 77 rows a linear scan is 0.44 ms. ChromaDB would add
+  a persistence layer, a schema and a migration story to index a tuple that fits on one screen.
+- **The damage is character-level, not semantic.** The recognizer drops combining marks and
+  hallucinates a syllable. Edit distance models exactly that. A sentence embedding answers a
+  different question — whether two names *mean* the same thing — and proper nouns are precisely
+  where that signal is weakest.
+- **The budget forbids it.** `CLAUDE.md` allows RAG 15 ms. Sentence-transformer inference on
+  CPU is tens of milliseconds before the ~500 MB of dependencies and the model load. The
+  shipped approach uses 3% of the budget.
+- **It is still retrieval-augmented.** Retrieval against a knowledge base, used to correct
+  generated output. Lexical retrieval is retrieval; BM25 did not stop being RAG.
+
+If the knowledge base ever grows a real plate registry (millions of rows, fuzzy semantic
+queries), revisit. Nothing here forecloses that — `rag/embeddings/` and `rag/retriever/` are
+still empty scaffold directories, deliberately left in place.
+
+**Plate correction was scoped out, not forgotten.** Part A said "province/plate KB". There is
+no plate registry and no legal way to invent one; Phase 4 already validates plate *format*.
+Correcting a plate number against a fabricated KB would manufacture authority the data does not
+have. Out of scope until a real registry exists.
+
+### Decisions
+- **Deterministic first, fuzzy second.** `correct_province` calls Phase 4's `match_province`
+  before scoring anything. This is load-bearing, not an optimization: a mark-stripped `เพชรบุรี`
+  scores 1.000 but sits only 0.143 from `เพชรบูรณ์`, so the margin guard would *abstain* on a
+  perfectly clean candidate. Exact matching catches it first.
+- **A margin, not just a floor, decides confidence.** `MIN_SCORE = 0.6`, `MIN_MARGIN = 0.15`.
+  The sweep in `docs/benchmark/rag-phase5.md` shows the floor contributes nothing to safety —
+  non-province text scores ~0.17 — while the margin takes mis-attributions from 4 to 0.
+- **Abstain over guess, again.** Same rule as Phase 4, now applied to a component whose whole
+  purpose is guessing. 5 of 231 degraded candidates return `None` rather than a close call.
+- **No shared helper with `postprocess`.** `rag.validator._lookup_key` duplicates one line of
+  `postprocess.provinces._lookup_key`. Extracting it would mean editing shipped Phase 4 code
+  for no behavioural gain; the duplication is one regex substitution and both paths are covered
+  by tests.
+
+### Verified
+| Behaviour | Result |
+|---|---|
+| `'ชลบรดี'` (the real Phase 3 misread) | → `ชลบุรี` @ 0.800 |
+| `'ชลบร 9'` (the other real misread) | → `ชลบุรี` @ 0.800 |
+| `'เพชรบรดี'` (ties two real provinces) | → `None` — abstains |
+| `'กข 1234'`, `'1กข 2345'`, `'VEZL'`, `''` | → `None` — no false positives |
+| All 77 under 3 observed degradations | 226 recovered, 5 abstained, **0 wrong** |
+| Latency, worst case (77-way scan) | median **0.44 ms**, p95 0.48 ms vs `<15 ms` — **met** |
+
+24 new tests; suite now **80 green**. Ruff, Black, MyPy clean
+(`mypy app detector ocr postprocess rag`). Reproducible:
+`poetry run python docs/benchmark/bench_rag.py`.
+
+**This is the first stage to meet its stated latency budget.** That says more about the budget's
+distribution than about this stage: detection is unmeasured, OCR misses `<40 ms` by ~10×.
+
+### ⚠️ Known gaps
+1. **One province pair is irrecoverable by construction.** Truncating `เพชรบูรณ์` by one
+   character yields `เพชรบร`, which *is* the mark-free skeleton of `เพชรบุรี`. The corrector
+   returns `เพชรบุรี` at full confidence and is right to — the distinguishing character no
+   longer exists. Only such pair in the 77; asserted by
+   `test_truncating_phetchabun_aliases_onto_phetchaburi`.
+2. **The degradation model comes from one synthetic plate.** Every input except two was damaged
+   programmatically, and those two came from OCR on *rendered text, not a photograph*. The
+   thresholds are tuned to failures we have seen, which is not the same as the failures that
+   exist. Expect to retune once real plate photos land.
+3. **Abstention needs handling upstream.** 5 of 231 return `None`. Phase 6 must render a
+   missing province as unknown, not as a failure.
+
+---
+
+## Part G — Full `/recognize` Slice (✅ shipped 2026-08-05)
+
+**Goal:** run the whole pipeline in one request. The first time detection, perspective, OCR,
+post-processing and RAG have executed together in the running application.
+
+**Modules:** `app/schemas/recognize.py`, `app/services/recognize_service.py`,
+`app/api/recognize.py`. Pure wiring — no new dependencies, no new algorithms.
+
+### Decisions
+- **Every plate, not the best one.** A scene can hold several plates, so the response is
+  `{count, plates: [...]}`, mirroring `/detect`'s shape. Reporting only the highest-confidence
+  detection would silently discard plates the detector actually found. The cost is honest and
+  linear: N plates ≈ N × the OCR figure.
+- **Reuse the singletons, do not rebuild them.** The service imports `get_detector` and
+  `get_recognizer` from the Phase 1 and Phase 3 services rather than constructing its own.
+  Duplicating the `lru_cache` would put two YOLO models and two PaddleOCR engines in one process.
+- **Abstention renders as `null`, never as an error.** `province: null` with
+  `province_candidates` still populated means *unknown*, which is what Phases 4 and 5 built
+  toward. Likewise a misread number is returned verbatim with `is_well_formed: false`. Nothing in
+  this layer guesses; that was the whole point of the two stages below it.
+- **One bad box does not fail the request.** `correct_perspective` raises `ValueError` for a box
+  with no area inside the image. That plate is skipped with a warning and the rest are returned.
+- **Crop size moved into `Settings`.** Phase 2 deferred `output_size`/`padding` until a caller
+  needed them; Phase 6 is that caller. `plate_crop_width`/`plate_crop_height`/`plate_crop_padding`
+  default to exactly the previous keyword values, so behaviour is unchanged — but the known
+  placeholder ratio is now tunable by env var when real photographs arrive.
+- **Timings are logged, not returned.** Per-stage latency goes to the structured log; the
+  benchmark is the authority on numbers. Keeps the response contract to what a client needs.
+
+### Deviation: a Phase 0 logging bug had to be fixed
+`JsonFormatter` built its payload from four fixed fields and silently discarded everything passed
+via `extra=` — including the `path` field that `detector/detector.py` had been logging since
+Phase 1. Timings would have vanished the same way. The formatter now merges caller-supplied
+fields, filtered against `LogRecord`'s reserved attribute names. Out of the strict Phase 6 scope,
+but the chosen timings mechanism does not work without it.
+
+### Verified
+| Behaviour | Result |
+|---|---|
+| Two detections | `count: 2`, both plates fully populated |
+| `'ชลบรดี'` (real Phase 3 misread) | → `ชลบุรี` @ 0.800 |
+| `'เพชรบรดี'` (ambiguous) | → `province: null`, candidates preserved |
+| `'VEZL'` (real Phase 3 misread) | verbatim, `is_well_formed: false` |
+| No detections | `200`, `count: 0` |
+| Box outside the image | skipped; neighbouring plate still returned |
+| Bad type / oversize / undecodable / no weights | `415` / `413` / `400` / `503` |
+
+13 new tests; suite now **93 green**. Ruff, Black, MyPy clean
+(`mypy app detector ocr postprocess rag`).
+
+### Measured — end to end, for the first time
+`poetry run python docs/benchmark/bench_recognize.py`, recorded in
+`docs/benchmark/recognize-phase6.md`:
+
+| Stage | Median | Budget |
+|---|---|---|
+| Detection | **unmeasured** (no trained weights) | <25 ms |
+| Perspective | 0.5 ms | — |
+| OCR | 411 ms | <40 ms — **~10× over** |
+| Post-processing + RAG | 0.6 ms | <15 ms — met |
+| **Total (lower bound)** | **412 ms** | **<100 ms — 4.1× over** |
+
+OCR owns 99.7% of the runtime. Adding a trained detector would not change the shape of the
+problem.
+
+One genuinely new result: the recognizer damaged `ชลบุรี` into `'ชลบูรดี 9'` and Phase 5's
+corrector recovered it at 0.667 — a damage pattern it was never tuned against. First evidence the
+RAG stage works on input it did not see during development.
+
+### ⚠️ Known gaps carried forward
+1. **The `<100 ms` budget is not met and is not close.** Optimization is deliberately its own
+   phase; this benchmark is the baseline to beat. Largest untried lever remains skipping
+   PaddleOCR's text-detection pass on an already-rectified crop.
+2. **Detection has still never been timed.** No weights have ever been trained, so every total
+   above is a lower bound and `/recognize` returns `503` against a real upload today.
+3. **Evidence is still synthetic.** Rendered text, not photographs. All accuracy claims stay
+   provisional until a real Thai plate dataset exists.

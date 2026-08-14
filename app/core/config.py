@@ -19,6 +19,9 @@ class Settings(BaseSettings):
         allowed_image_types: Content types accepted by image endpoints.
         ocr_lang: PaddleOCR language code used for recognition.
         ocr_min_confidence: Recognized lines below this score are discarded.
+        plate_crop_width: Width of the rectified plate crop handed to OCR.
+        plate_crop_height: Height of the rectified plate crop handed to OCR.
+        plate_crop_padding: Fraction of box size the crop is expanded by.
     """
 
     model_config = SettingsConfigDict(
@@ -40,6 +43,12 @@ class Settings(BaseSettings):
 
     ocr_lang: str = "th"
     ocr_min_confidence: float = 0.5
+
+    # A placeholder ratio, not a measured Thai-plate one. Exposed here so it
+    # can be calibrated against real photographs without a code change.
+    plate_crop_width: int = 256
+    plate_crop_height: int = 128
+    plate_crop_padding: float = 0.04
 
 
 @lru_cache
