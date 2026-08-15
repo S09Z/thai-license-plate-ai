@@ -32,7 +32,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 4 ✅ | Post-processing | `postprocess/` | — | done — plate normalized, province mapped deterministically; 14 pure-function tests |
 | 5 ✅ | RAG validation | `rag/` | ~~chromadb, sentence-transformers~~ **none** (see Part F) | done — `ชลบรดี` → `ชลบุรี`; 0 mis-attributions over 231 degraded candidates; **0.44ms vs <15ms budget — met** |
 | 6 ✅ | Full `/recognize` | `app/api/recognize.py`, `app/services/recognize_service.py` | — | done — chains 1→5, one JSON response per plate; **412ms lower bound vs <100ms budget — 4.1× over (see Part G)** |
-| **7** | **Web UI** (next) | `web/templates`, `web/static` | (jinja2/gradio TBD) | upload image → view boxed result + text |
+| 7 ✅ | Web UI | `web/static/`, `app/api/web.py` | ~~jinja2/gradio~~ **none** (see Part H) | done — upload → boxed canvas + results table; abstention shown as "Unknown"; **503 empty state is the real answer today** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred, no trained weights
@@ -412,3 +412,101 @@ RAG stage works on input it did not see during development.
    above is a lower bound and `/recognize` returns `503` against a real upload today.
 3. **Evidence is still synthetic.** Rendered text, not photographs. All accuracy claims stay
    provisional until a real Thai plate dataset exists.
+
+---
+
+## Part H — Web UI Slice (✅ shipped 2026-08-05)
+
+The last slice on the roadmap. Phase 6 made the pipeline answer in one request, but the only way
+to exercise it was `curl`. Phase 7 puts it in a browser: upload an image, see the plates boxed on
+it, read the number and province beside it.
+
+**A pure client of the existing JSON API.** No pipeline code changed, no new dependencies —
+`StaticFiles` ships with starlette, and Phase 6 already returned everything the page needs.
+
+### Decision: no template engine
+
+Part A had pencilled in `web/templates` with jinja2 or gradio. Neither is used. The page is
+static HTML/CSS/JS served from `web/static/`, calling `POST /recognize` with `fetch`. A template
+engine would render values the API already returns, making a second contract to keep in step with
+the first. The dead `web/templates/.gitkeep` scaffolding was removed with this phase.
+
+### Files
+
+| File | Role |
+|---|---|
+| `app/api/web.py` | `GET /` → `FileResponse(index.html)`, `include_in_schema=False` |
+| `web/static/index.html` | upload control, canvas, results table |
+| `web/static/app.js` | submit, draw boxes, render rows, map errors |
+| `web/static/style.css` | minimal layout |
+| `app/main.py` | registers `web_router`, mounts `/static` |
+| `tests/unit/test_web_ui.py` | 5 route tests |
+
+`WEB_ROOT` resolves from the module location, not the process working directory, so `uvicorn`
+started from anywhere works.
+
+### Two things this UI is careful about
+
+**1. It never executes OCR output.** CLAUDE.md's "Never execute OCR output" becomes a concrete
+browser rule: every recognized string reaches the DOM through `textContent`, never `innerHTML`,
+and is never evaluated. The canvas draws only the row *number* over each box — never the
+recognized text — which also keeps Thai glyph rendering out of the canvas.
+
+**2. It shows abstention as abstention.** `province: null` renders as "Unknown", muted and
+italic, with the raw `province_candidates` shown beside it. `is_well_formed: false` shows the
+number exactly as read and marks it. Neither is cleaned up into something plausible — that is
+the whole point of Phases 4 and 5, and the UI is where it would have been easiest to throw away.
+
+Box coordinates are source-image pixels, so the canvas is drawn at `naturalWidth/naturalHeight`
+and scaled down by CSS. No coordinate maths, nothing to get subtly wrong.
+
+### Verification
+
+`pytest` 98 green (93 from Phase 6 + 5 new); ruff, black, mypy clean. Route tests deliberately assert nothing
+about markup or JS internals — those tests break on every edit and prove nothing. Interactive
+behaviour was checked in a real browser instead:
+
+| Check | Result |
+|---|---|
+| **Submit a real photo → `503`** | ✅ **"Detector model is not installed…"** — the correct answer today, and the main thing this phase had to get right |
+| Happy path (2 plates) | ✅ verified **against a stubbed detector/OCR only** — no weights exist. Boxes drew at correct coordinates, numbered to match rows; `กข 1234`/`ชลบุรี` clean, `VEZL`/`Unknown` muted |
+| `.txt` renamed `.png` | ✅ caught **twice**: the client's preview rejects it before upload, and submitting anyway returns `400 "Payload does not decode to an image"`, surfaced verbatim |
+| `/health`, `/docs`, `/openapi.json` | ✅ unshadowed by the `/static` mount; `GET /` absent from the schema |
+
+### Addendum — live camera capture (same PR, same branch)
+
+Extends the same page with a "Start camera" / "Stop" panel: `getUserMedia` shows the laptop's
+camera live, and every 1.5s a frame is captured to an in-memory canvas and sent through the exact
+same `recognize()` → `drawScene()` → `renderRows()` path the upload flow already uses — no new
+endpoint, no pipeline change. Two existing functions in `app.js` were generalized rather than
+duplicated: `recognize()` now attaches the HTTP status to the thrown error, and `drawScene()`
+reads `source.naturalWidth ?? source.width` so it accepts a captured `<canvas>` frame the same way
+it already accepted an uploaded `<img>`.
+
+Because no detector weights exist, every capture answers `503` today. Retrying on the same
+schedule would just hammer a known-broken endpoint, so the loop **auto-stops on the first `503`**
+and re-enables Start; any other error (one garbled frame, a network blip) is shown but the loop
+keeps going, since the next frame is likely fine.
+
+Verified live in a browser: the first run surfaced a real bug the design hadn't anticipated — the
+very first capture fired before the video's `loadedmetadata` event, so `videoWidth`/`videoHeight`
+were still `0` and every camera session opened with a guaranteed, misleading `400` before the
+`503`. Fixed by awaiting `loadedmetadata` (or checking `readyState`) before the first capture.
+Re-verified: exactly one request, a clean `503`, Start/Stop/video state all reset correctly. The
+upload flow was re-checked afterward against the two edited shared functions — unchanged
+behaviour, no regression.
+
+**Known gap:** permission-denial and manual mid-capture Stop were not independently exercised —
+the automated session's `getUserMedia` was auto-granted with no fake device, and the loop
+auto-stopped on `503` faster than a manual Stop click could race it. `stopCamera()` is the same
+function both paths call, and it was verified via the auto-stop path, so this is a coverage gap
+in the *test*, not unverified code — but it should be said plainly rather than implied covered.
+
+### ⚠️ Known gaps carried forward
+1. **The happy path has never run against real weights.** Every box and every string seen in a
+   browser so far came from a stub. The `503` is the only end-to-end-honest browser result.
+2. **All Phase 3–6 gaps still stand**: 412 ms vs the `<100 ms` budget, detection untimed,
+   evidence entirely synthetic.
+3. ~~No UI affordance for slow responses beyond a disabled button.~~ Partially addressed by the
+   camera loop's own auto-stop-on-503, but the upload flow's disabled-button-only feedback during
+   a slow request is still unchanged.

@@ -52,6 +52,9 @@ datasets/raw/
 datasets/processed/
 datasets/augmented/
 
+# Ultralytics training run output (results.csv, args.yaml, plots, weights)
+runs/
+
 # Logs
 logs/*.log
 

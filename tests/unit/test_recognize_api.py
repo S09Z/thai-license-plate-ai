@@ -258,9 +258,14 @@ def test_recognize_rejects_oversize_upload(
 
 
 def test_recognize_reports_unavailable_when_weights_missing(
-    client: TestClient, stub_ocr: Callable[[str, str], None]
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    stub_ocr: Callable[[str, str], None],
 ) -> None:
     """With no weights installed, a valid upload returns 503 rather than 500."""
     stub_ocr("กข 1234", "ชลบุรี")
+    monkeypatch.setenv("APP_DETECTOR_MODEL_PATH", "models/detector/does-not-exist.pt")
+    get_settings.cache_clear()
+    get_detector.cache_clear()
 
     assert _post(client).status_code == 503
