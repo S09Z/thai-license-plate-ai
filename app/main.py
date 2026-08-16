@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.detection import router as detection_router
+from app.api.face import router as face_router
 from app.api.health import router as health_router
 from app.api.ocr import router as ocr_router
 from app.api.recognize import router as recognize_router
@@ -28,6 +29,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, version=settings.version)
     app.include_router(health_router)
     app.include_router(detection_router)
+    app.include_router(face_router)
     app.include_router(ocr_router)
     app.include_router(recognize_router)
     app.include_router(web_router)
