@@ -13,15 +13,26 @@
       Upload a photo to detect plates, read the number and resolve the province.
     </p>
 
+    <div id="mode-switch" role="group" aria-label="Input source">
+      <button type="button" id="upload-mode-button" aria-pressed="true">Upload photo</button>
+      <button type="button" id="camera-mode-button" aria-pressed="false">Live camera</button>
+    </div>
+
     <form id="upload-form">
       <input type="file" id="file-input" accept="image/png, image/jpeg" required>
       <button type="submit" id="submit-button">Recognize</button>
     </form>
 
-    <div id="camera-panel">
+    <div id="camera-panel" hidden>
       <button type="button" id="start-camera-button">Start camera</button>
       <button type="button" id="stop-camera-button" hidden>Stop</button>
-      <video id="camera-feed" autoplay playsinline muted hidden></video>
+      <label class="toggle" for="show-faces">
+        <input type="checkbox" id="show-faces"> Show faces
+      </label>
+      <div id="camera-stage" hidden>
+        <video id="camera-feed" autoplay playsinline muted></video>
+        <canvas id="tracking-overlay"></canvas>
+      </div>
     </div>
 
     <p id="status" class="status" hidden></p>

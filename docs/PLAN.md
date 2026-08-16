@@ -32,11 +32,15 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 4 ✅ | Post-processing | `postprocess/` | — | done — plate normalized, province mapped deterministically; 14 pure-function tests |
 | 5 ✅ | RAG validation | `rag/` | ~~chromadb, sentence-transformers~~ **none** (see Part F) | done — `ชลบรดี` → `ชลบุรี`; 0 mis-attributions over 231 degraded candidates; **0.44ms vs <15ms budget — met** |
 | 6 ✅ | Full `/recognize` | `app/api/recognize.py`, `app/services/recognize_service.py` | — | done — chains 1→5, one JSON response per plate; **412ms lower bound vs <100ms budget — 4.1× over (see Part G)** |
-| 7 ✅ | Web UI | `web/static/`, `app/api/web.py` | ~~jinja2/gradio~~ **none** (see Part H) | done — upload → boxed canvas + results table; abstention shown as "Unknown"; **503 empty state is the real answer today** |
+| 7 ✅ | Web UI | `web/static/`, `app/api/web.py` | ~~jinja2/gradio~~ **none** (see Part H) | done — upload → boxed canvas + results table; abstention shown as "Unknown" |
+| 8 ✅ | UI mode switch | `web/static/` | — | done — Upload / Live camera toggle, one panel at a time (see Part I.1) |
+| 9 ✅ | Realtime tracking | `web/static/` | — | done — `/detect` at 200 ms strokes boxes over the live video; `/recognize` stays at 1.5 s for the table (see Part I.2) |
+| 10 ✅ | Face detection boxes | `face/`, `app/api/face.py`, `web/static/` | — (opencv's bundled YuNet) | done — `POST /detect/faces`, opt-in overlay beside plate boxes; **17.6ms vs <25ms budget — met (see Part J)** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
-version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred, no trained weights
-exist yet**; experiment log under `docs/experiments/` — **still deferred**; latency benchmark under
+version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
+v0.1 weights now exist at `models/detector/best.pt` (gitignored); experiment log under
+`docs/experiments/` — **✅ landed** (`detector-v0.1.md`); latency benchmark under
 `docs/benchmark/` — **✅ landed in Phase 3** (`bench_ocr.py` + `ocr-phase3.md`), extended in Phase 5 (`bench_rag.py` + `rag-phase5.md`), the pattern to
 follow when later stages need numbers.
 
@@ -391,7 +395,7 @@ but the chosen timings mechanism does not work without it.
 
 | Stage | Median | Budget |
 |---|---|---|
-| Detection | **unmeasured** (no trained weights) | <25 ms |
+| Detection | **unmeasured at the time** — since measured at 25 ms, see below | <25 ms |
 | Perspective | 0.5 ms | — |
 | OCR | 411 ms | <40 ms — **~10× over** |
 | Post-processing + RAG | 0.6 ms | <15 ms — met |
@@ -408,8 +412,11 @@ RAG stage works on input it did not see during development.
 1. **The `<100 ms` budget is not met and is not close.** Optimization is deliberately its own
    phase; this benchmark is the baseline to beat. Largest untried lever remains skipping
    PaddleOCR's text-detection pass on an already-rectified crop.
-2. **Detection has still never been timed.** No weights have ever been trained, so every total
-   above is a lower bound and `/recognize` returns `503` against a real upload today.
+2. ~~**Detection has still never been timed.**~~ **Resolved after this benchmark was written.**
+   Detector v0.1 was trained (`docs/experiments/detector-v0.1.md`) and timed at 25 ms
+   (`docs/benchmark/detect-v0.1.md`), and `models/detector/best.pt` now exists, so `/recognize`
+   no longer answers `503`. The end-to-end totals above still predate those weights and should be
+   re-run before being quoted as the current cost of a full request.
 3. **Evidence is still synthetic.** Rendered text, not photographs. All accuracy claims stay
    provisional until a real Thai plate dataset exists.
 
@@ -483,7 +490,12 @@ duplicated: `recognize()` now attaches the HTTP status to the thrown error, and 
 reads `source.naturalWidth ?? source.width` so it accepts a captured `<canvas>` frame the same way
 it already accepted an uploaded `<img>`.
 
-Because no detector weights exist, every capture answers `503` today. Retrying on the same
+> **Superseded by Part I.** Camera mode no longer draws through `drawScene()` at all, so the
+> `?? source.width` fallback described above has been removed and `drawScene()` is once again
+> `<img>`-only. `recognize()` keeping the HTTP status on the error stands, and Part I's
+> `detectOnly()` relies on it.
+
+Because no detector weights existed at the time, every capture answered `503`. Retrying on the same
 schedule would just hammer a known-broken endpoint, so the loop **auto-stops on the first `503`**
 and re-enables Start; any other error (one garbled frame, a network blip) is shown but the loop
 keeps going, since the next frame is likely fine.
@@ -510,3 +522,197 @@ in the *test*, not unverified code — but it should be said plainly rather than
 3. ~~No UI affordance for slow responses beyond a disabled button.~~ Partially addressed by the
    camera loop's own auto-stop-on-503, but the upload flow's disabled-button-only feedback during
    a slow request is still unchanged.
+
+---
+
+## Part I — Mode Switch + Realtime Tracking (✅ shipped 2026-08-06)
+
+Two UI slices on top of Part H, both frontend-only — no Python, no schema, no new route.
+Branches `feature/phase-8` (PR #8) and `feature/phase-9`.
+
+### I.1 — Upload / camera mode switch (PR #8, `d8c3fe9`)
+
+A segmented **Upload photo** / **Live camera** control (`#mode-switch`) so the two input panels are
+never visible at once. `setMode()` toggles `hidden` on the form and `#camera-panel`, mirrors state
+onto `aria-pressed`, and calls the existing `stopCamera()` when leaving camera mode so the device is
+released rather than left streaming behind a hidden panel. Upload is the default.
+
+**Bug found during verification, fixed in the same commit.** `form` and `#camera-panel` each declare
+their own author-origin `display`, which beats the browser's default `[hidden] { display: none }` UA
+rule regardless of specificity — so toggling the `hidden` attribute alone had no visual effect even
+though the JS and ARIA state were correct. Fixed with explicit `[hidden] { display: none; }`
+overrides for both.
+
+### I.2 — Realtime plate tracking in camera mode (`5d5e76d`, `ca1b579`)
+
+Before: camera mode captured a frame every 1.5 s, posted it to `/recognize`, and painted the
+*returned frame* into `#preview-panel` with boxes on it. A moving plate therefore got a new frozen
+snapshot every 1.5 s, never a box that follows it.
+
+After: two independent self-rescheduling loops run over the **still-playing** video.
+
+| Loop | Endpoint | Cadence | Job |
+|---|---|---|---|
+| `trackLoop()` | `POST /detect` | 200 ms | stroke boxes onto a transparent canvas over the video |
+| `captureAndRecognize()` | `POST /recognize` | 1500 ms | refresh the results table (text, province) |
+
+This is only possible because `/detect` skips OCR entirely. Measured **21–37 ms warm** browser
+round trip (70 ms first call) against the real v0.1 weights, versus ~400 ms for the full pipeline —
+so 200 ms is a conservative interval, not an aspirational one. Each loop schedules its next tick
+only after the current one resolves, so a slow response stretches the cadence instead of stacking
+requests.
+
+**Markup.** The `<video>` is wrapped in `#camera-stage` (`position: relative`) alongside a
+`#tracking-overlay` canvas (`position: absolute; inset: 0`). The video sets the rendered size; the
+overlay's *internal* resolution is set to `videoWidth`/`videoHeight`, so API box coordinates map 1:1
+and CSS handles the downscale — no manual coordinate math on resize. Visibility is toggled on the
+wrapper so video and overlay can never desync.
+
+**Consequences for existing code.** Camera mode no longer touches `#preview-panel` or
+`drawScene()`; both are now upload-only, and `drawScene()`'s `?? source.width` canvas fallback was
+removed as dead code (see the superseded note in Part H). `detectOnly()` deliberately mirrors
+`recognize()`'s error handling, including carrying `.status`, so a `503` stops the whole camera
+session exactly as before.
+
+**Deliberately not built:** no row numbers on tracked boxes (correlating a 200 ms detect tick to a
+1.5 s-old OCR row would need cross-frame IoU tracking; without it a number points at the wrong plate
+more often than the right one), and no UI control for the interval — one named `TRACK_INTERVAL_MS`,
+matching the existing `CAPTURE_INTERVAL_MS`.
+
+**Second cascade bug, same class as I.1 (`ca1b579`).** The overlay inherited the shared
+`canvas { background: var(--surface); border; border-radius }` rule written for the upload preview,
+so the "transparent" overlay was an **opaque white sheet over the video** — the camera started, the
+permission was granted, and the panel rendered blank white. Reported by the user, confirmed by
+reading the computed style (`rgb(255, 255, 255)`), fixed by resetting `background`, `border` and
+`border-radius` on `#tracking-overlay` only. `#camera-feed` still carries the same inherited white
+background; harmless because it sits *behind* the video, but it is the same latent pattern.
+
+### Verification
+
+| Check | Result |
+|---|---|
+| `/detect` warm round trip, from the browser via `detectOnly()` | ✅ 21, 23, 26, 32, 37 ms (70 ms cold) |
+| Overlay pixel-aligned with the video, before and after the border reset | ✅ exact match at 640×360 with a 1280×720 bitmap |
+| `drawTrackingBoxes()` paints, `clearRect` wipes | ✅ 2400 px stroked for one box; 0 px remaining after clear (no smearing) |
+| Overlay transparent where there is no box | ✅ off-stroke `[0,0,0,0]`, on-stroke `[224,36,94,255]` |
+| Upload flow regression after the `drawScene()` simplification | ✅ preview canvas still sizes to the source image, panel still revealed |
+| `pytest` / `ruff` / `black` / `mypy` | ✅ 98 passed, all clean (no backend touched) |
+
+### ⚠️ Known gaps
+
+1. **No camera device in this environment.** `getUserMedia`, real video playback, and an actual box
+   following an actual moving plate have **never been observed**. The geometry `startCamera()`
+   produces was *simulated* to test alignment and compositing. The loops and the overlay are proven;
+   their integration with a live stream is not.
+2. **Detection returned 0 boxes on the synthetic test plate**, matching the out-of-distribution
+   caveat already in `docs/benchmark/detect-v0.1.md`. The plumbing is proven end to end; that boxes
+   appear around *real* plates is not — that needs a photograph, or the camera.
+3. **The 200 ms interval is measured against `127.0.0.1`.** Any real deployment adds network
+   latency; the loop degrades gracefully (cadence stretches, no stacking) but the number would not
+   hold.
+4. **No `beforeunload`/`visibilitychange` release** — carried forward from Part H unchanged.
+
+---
+
+## Part J — Face Detection Slice (✅ shipped 2026-08-07)
+
+Phase 9 put plate boxes on the live video. This puts **face boxes** beside them, in a distinct
+colour, behind an opt-in checkbox that is **off by default** — face inference should not be paid for
+unless it is asked for.
+
+### Scope boundary, deliberate and load-bearing
+
+This is face **detection** — locating a region in a frame — and explicitly **not** face
+**recognition**. Nothing here identifies a person, computes an embedding, matches against a gallery,
+or persists a frame. YuNet returns five landmarks per face and they are **discarded** at the wrapper
+boundary; the endpoint reports coordinates and a score, nothing else.
+
+If identification is ever wanted it is a different feature with different consent and legal
+questions — Thailand's PDPA treats biometric identifiers as sensitive personal data — and should be
+designed as such, not bolted onto this endpoint.
+
+### Decisions
+
+- **YuNet ONNX over a Haar cascade**, on measurement rather than reputation. Haar was timed first at
+  720p: 6.1 ms on a blank frame but **56.0 ms on a textured one**, a 9× content-dependent swing that
+  breaks the `<25 ms` budget on its own. YuNet does not show that spread (16.6 vs 17.6 ms), and the
+  benchmark times both frame kinds specifically to *check* that rather than assume it. Full numbers
+  in `docs/benchmark/face-phase10.md`.
+- **A separate `POST /detect/faces` rather than a flag on `/detect`.** Different model, different
+  failure mode, different opt-in. It also lets the camera tick request faces only when wanted.
+- **`DetectionResponse` reused unchanged.** The shape (`count`, `boxes`) and the meaning are
+  identical to a plate box; a `FaceResponse` clone would be a distinction without a difference.
+  `face/detector.py` likewise returns `detector.detector.Detection` — importing that frozen dataclass
+  is a one-way dependency on a pure value type, cheaper than a duplicate plus mapping code.
+- **Structure copied from the plate detector deliberately**: lazy load on first `detect()`,
+  module-level `_load_yunet` so tests patch it exactly as `_load_yolo` is patched, `FileNotFoundError`
+  → 503, `@lru_cache` service singleton, identical 415/413/400/503 exception mapping.
+
+### Deviation from the plan: a missing face model no longer stops the camera
+
+The plan specified that `detectFaces()` mirror `detectOnly()` so that a 503 "stops the session the
+same way". Implemented literally, that meant a missing *face* model would kill *plate* tracking too.
+
+The rationale for stopping was "don't hammer a known-broken endpoint" — and unticking the checkbox
+achieves that completely, since the face request is then not issued at all. So a face 503 now
+unticks "Show faces" and reports why, while plate tracking continues; a **plate** 503 still calls
+`stopCamera()` unchanged. Verified live: with the face model absent, `/detect/faces` returns 503 and
+`/detect` on the same server returns 200.
+
+### Measured — `docs/benchmark/face-phase10.md`
+
+| | Median | Budget |
+|---|---|---|
+| Face, flat 720p frame | 16.6 ms | |
+| Face, textured 720p frame | **17.6 ms** | `<25 ms` ✅ **met** |
+| Camera tick, both requests concurrent | 23.0 ms | |
+| Camera tick, if issued serially | 40.6 ms | |
+
+The tick issues both requests from a **single captured frame** via `Promise.all`, so it costs the
+slower stage rather than the sum. Cold start is 203 ms, paid once per process.
+
+This is the **second stage to meet its budget**, after RAG. Note it is not on the `/recognize` path
+at all, so it does not affect the 4.1× total-pipeline miss that OCR still dominates.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `POST /detect/faces` on a **real photograph** | ✅ 1 box, conf **0.946**, visually confirmed on the face |
+| w/h → x1,y1,x2,y2 conversion against live model output | ✅ correct (the real-photo box lands on the face) |
+| 415 / 413 / 400 / 503 mapping | ✅ all four, against a live server |
+| Face model absent → 503, plates unaffected | ✅ `/detect/faces` 503, `/detect` 200 on the same process |
+| Checkbox **off** → one request per tick | ✅ `/detect` only |
+| Checkbox **on** → both, concurrently | ✅ `/detect` + `/detect/faces`, issued 0 ms apart, **one** frame built |
+| Single `clearRect` per tick | ✅ `clearRect → strokeRect(#e0245e) → strokeRect(#00b8d4)`; faces do not erase plates |
+| `.toggle` did not leak to the upload form | ✅ `#file-input` still `display: block`, `gap: normal` |
+| `/detect`, `/recognize`, `/health` regression | ✅ 200 each; `/detect/faces` present in the OpenAPI schema |
+| `pytest` / `ruff` / `black` / `mypy` | ✅ **112 passed** (98 + 14 new), all clean |
+
+Both browser passes force-reloaded the static assets before checking anything, per the stale-cache
+lesson in Part I. **A stale server nearly invalidated this one too**: two `uvicorn` processes from
+earlier sessions were still bound to port 8000 and answered the first round of endpoint checks.
+Those results were discarded and every check re-run against a single, verified-fresh process.
+
+### Deliberately not built
+
+- No recognition, embeddings, identity matching, or frame persistence (see the scope boundary).
+- No redaction/blur — `POST /redact` stays a separate future feature.
+- No face boxes in the **upload** flow; the request was camera mode, and `/recognize` has its own
+  response shape that faces would not fit without changing a shipped schema.
+- No configurable face-track interval — `TRACK_INTERVAL_MS` governs both loops.
+- No landmark rendering — that is Phase 11, which builds on this phase's boxes.
+
+### ⚠️ Known gaps
+
+1. **Detection accuracy is essentially unmeasured.** One public-domain still photograph was detected
+   correctly at 0.946. That is a single frontal, well-lit portrait — it is *not* evidence for the
+   conditions this feature runs in. There is still **no camera device in this environment**, so no
+   face has ever been tracked in a live stream, at an angle, in motion, or in poor light.
+2. **The benchmark frames contain no faces**, so the latency figures bound speed only. YuNet's cost
+   is input-size-bound, so faces being present should not change them — but that is reasoning, not a
+   measurement.
+3. **The model is gitignored** (`.gitignore:47`, `*.onnx`), so a fresh clone must run
+   `make fetch-face-model`. Absent, the endpoint answers 503 by design and the checkbox unticks
+   itself rather than failing silently.
+4. **The 200 ms tick is measured against `127.0.0.1`** — carried forward from Part I unchanged.
