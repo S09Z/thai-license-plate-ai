@@ -122,6 +122,14 @@ canvas {
   display: none;
 }
 
+/* Class-scoped on purpose: a bare `label` or `input` rule here would reach the
+   upload form's file input too. That cascade trap has bitten twice already. */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
 /* The live video and its tracking overlay share one box: the video sets the
    rendered size, and the absolutely-positioned canvas is stretched over it. */
 #camera-stage {

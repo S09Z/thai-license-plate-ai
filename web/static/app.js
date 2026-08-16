@@ -20,8 +20,12 @@ const stopCameraButton = document.getElementById("stop-camera-button");
 const uploadModeButton = document.getElementById("upload-mode-button");
 const cameraModeButton = document.getElementById("camera-mode-button");
 const cameraPanel = document.getElementById("camera-panel");
+const showFacesToggle = document.getElementById("show-faces");
 
 const BOX_COLOUR = "#e0245e";
+// Faces are a different kind of thing from plates, so they get a different
+// colour rather than a different line style — colour survives a glance.
+const FACE_BOX_COLOUR = "#00b8d4";
 const BOX_WIDTH = 3;
 const CAPTURE_INTERVAL_MS = 1500;
 // Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
@@ -34,6 +38,10 @@ const TRACK_INTERVAL_MS = 200;
 const WEIGHTS_MISSING =
   "Detector model is not installed, so recognition cannot run yet. " +
   "Install trained plate weights at the configured detector path to enable it.";
+
+const FACE_MODEL_MISSING =
+  "Face detection model is not installed, so face boxes are unavailable. " +
+  "Fetch it with `make fetch-face-model` to enable them.";
 
 let loadedImage = null;
 let objectUrl = null;
@@ -210,6 +218,41 @@ async function detectOnly(file) {
   throw error;
 }
 
+/** Post the file to /detect/faces, raising a readable error on failure.
+ *
+ * Parallel to detectOnly() above, with its own 503 wording: a missing face
+ * model is a different missing file from a missing plate detector, and the
+ * message has to tell someone which one to install.
+ */
+async function detectFaces(file) {
+  const body = new FormData();
+  body.append("file", file);
+
+  const response = await fetch("/detect/faces", { method: "POST", body });
+  if (response.ok) {
+    return response.json();
+  }
+
+  if (response.status === 503) {
+    const error = new Error(FACE_MODEL_MISSING);
+    error.status = response.status;
+    throw error;
+  }
+
+  let detail = `Face detection failed (HTTP ${response.status}).`;
+  try {
+    const payload = await response.json();
+    if (typeof payload.detail === "string") {
+      detail = payload.detail;
+    }
+  } catch {
+    // A non-JSON error body is not worth reporting over the status code.
+  }
+  const error = new Error(detail);
+  error.status = response.status;
+  throw error;
+}
+
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   results.hidden = true;
@@ -344,12 +387,20 @@ async function frameToFile(frame) {
  * correspondence to a row in the (much slower) results table, so a number would
  * point at the wrong plate more often than the right one.
  */
-function drawTrackingBoxes(boxes) {
+function drawTrackingBoxes(plates, faces) {
   const context = trackingOverlay.getContext("2d");
+  // One clear for both kinds of box. Clearing per-kind would mean the second
+  // draw erased the first, leaving only whichever ran last on screen.
   context.clearRect(0, 0, trackingOverlay.width, trackingOverlay.height);
-  context.strokeStyle = BOX_COLOUR;
   context.lineWidth = BOX_WIDTH;
-  boxes.forEach(({ x1, y1, x2, y2 }) => {
+
+  context.strokeStyle = BOX_COLOUR;
+  plates.forEach(({ x1, y1, x2, y2 }) => {
+    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  });
+
+  context.strokeStyle = FACE_BOX_COLOUR;
+  faces.forEach(({ x1, y1, x2, y2 }) => {
     context.strokeRect(x1, y1, x2 - x1, y2 - y1);
   });
 }
@@ -362,12 +413,27 @@ function drawTrackingBoxes(boxes) {
  */
 async function trackLoop() {
   try {
-    const result = await detectOnly(await frameToFile(captureFrame()));
-    drawTrackingBoxes(result.boxes);
+    // The frame is built once and shared by both requests, which are issued
+    // concurrently so a tick costs one round trip's latency rather than two.
+    const file = await frameToFile(captureFrame());
+    const wantFaces = showFacesToggle.checked;
+    const [plates, faces] = await Promise.all([
+      detectOnly(file),
+      wantFaces ? detectFaces(file) : Promise.resolve({ boxes: [] }),
+    ]);
+    drawTrackingBoxes(plates.boxes, faces.boxes);
   } catch (error) {
     if (error.status === 503) {
-      stopCamera();
-      return;
+      // A missing face model disables only the overlay it powers; plate
+      // tracking still works, so the session keeps running with the box
+      // unticked. A missing plate detector still stops everything.
+      if (error.message === FACE_MODEL_MISSING) {
+        showFacesToggle.checked = false;
+        setStatus(error.message, "error");
+      } else {
+        stopCamera();
+        return;
+      }
     }
     // One dropped tick is not worth taking over the status line the recognize
     // loop owns; the boxes simply stay put until the next frame lands.
