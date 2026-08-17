@@ -1,4 +1,4 @@
-.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face fetch-face-model clean
+.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face fetch-face-model fetch-face-landmark-model clean
 
 help:
 	@echo "install         Install dependencies via Poetry"
@@ -16,6 +16,7 @@ help:
 	@echo "bench-detect    Run docs/benchmark/bench_detect.py"
 	@echo "bench-face      Run docs/benchmark/bench_face.py"
 	@echo "fetch-face-model  Download the YuNet ONNX face detection model"
+	@echo "fetch-face-landmark-model  Download the LBF 68-point landmark model"
 	@echo "clean           Remove Python and pytest caches"
 
 install:
@@ -63,6 +64,13 @@ fetch-face-model:
 	mkdir -p models/face
 	curl -fsSL -o models/face/face_detection_yunet_2023mar.onnx \
 		https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx
+
+# 54MB, and only needed for landmarks, so it is a separate target from the
+# detector model above rather than a second line inside it.
+fetch-face-landmark-model:
+	mkdir -p models/face
+	curl -fsSL -o models/face/lbfmodel.yaml \
+		https://raw.githubusercontent.com/kurnianggoro/GSOC2017/master/data/lbfmodel.yaml
 
 clean:
 	find . -type d -name "__pycache__" -not -path "./.venv/*" -exec rm -rf {} +

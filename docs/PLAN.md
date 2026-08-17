@@ -36,6 +36,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 8 ✅ | UI mode switch | `web/static/` | — | done — Upload / Live camera toggle, one panel at a time (see Part I.1) |
 | 9 ✅ | Realtime tracking | `web/static/` | — | done — `/detect` at 200 ms strokes boxes over the live video; `/recognize` stays at 1.5 s for the table (see Part I.2) |
 | 10 ✅ | Face detection boxes | `face/`, `app/api/face.py`, `web/static/` | — (opencv's bundled YuNet) | done — `POST /detect/faces`, opt-in overlay beside plate boxes; **17.6ms vs <25ms budget — met (see Part J)** |
+| 11 ✅ | Facial landmarks | `face/landmarks.py`, `app/schemas/face.py`, `web/static/` | — (opencv contrib's Facemark LBF) | done — `?landmarks=true` fits eyebrows/eyes/nose/mouth; **1.1ms per face vs <25ms budget — met (see Part K)** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -716,3 +717,139 @@ Those results were discarded and every check re-run against a single, verified-f
    `make fetch-face-model`. Absent, the endpoint answers 503 by design and the checkbox unticks
    itself rather than failing silently.
 4. **The 200 ms tick is measured against `127.0.0.1`** — carried forward from Part I unchanged.
+
+### Superseded by Phase 11
+
+Two claims above no longer describe the shipped code:
+
+- **The "Show faces" checkbox is gone**, replaced by a three-state `<select>` (Off / Face boxes /
+  Facial features). Where this part says the checkbox "unticks itself" on a 503, the control now
+  **steps down one level** instead — see Part K.
+- **`DetectionResponse` is no longer the face response shape.** `POST /detect/faces` returns
+  `FaceResponse` (`count`, `faces[].box`, `faces[].landmarks`). The reasoning in this part was
+  sound while a face was only a box; a face is now a box *plus* optional landmarks, which is the
+  distinction that was missing. Part K records the break.
+
+---
+
+## Part K — Facial Landmarks Slice (✅ shipped 2026-08-07)
+
+Phase 10 put a **box** around each face. This puts **points inside it**: eyebrows, eyes, nose and
+mouth, fitted with OpenCV contrib's 68-point Facemark LBF regressor and stroked over the live video
+as polylines. The face control becomes three-state — Off / Face boxes / Facial features — with the
+extra work opt-in at each step.
+
+### Scope boundary, tightened rather than relaxed
+
+Still **not** face recognition: nothing identifies a person, computes an embedding, matches a
+gallery, or persists a frame. Phase 10's boundary carries forward unchanged, and this phase makes it
+sharper rather than softer, because 68 landmarks are closer to a biometric template than a box is —
+Thailand's PDPA treats biometric identifiers as sensitive personal data.
+
+Concretely: **jaw points 0–16 are dropped at the wrapper boundary and never leave the process.** The
+jaw contour is the most identity-bearing part of the 68 — face shape is what a naive geometric
+matcher keys on — and it is not one of the four features the phase asked for. Discarding it costs
+nothing here and removes the most obviously misusable output.
+
+### Decisions
+
+- **Facemark LBF over dlib or MediaPipe.** LBF ships in the `opencv-contrib-python` already in the
+  lockfile, so the feature adds **no new dependency** — same reasoning that picked YuNet in Phase 10.
+  Measured at 1.1 ms per face it is comfortably inside budget, so the accuracy/size tradeoff against
+  a heavier model was never forced.
+- **An explicit `Path.is_file()` check before loading.** This is not defensive padding.
+  `cv2.face.createFacemarkLBF()` **constructs happily without a model** and only fails deep inside
+  `fit()` with a bare `cv2.error` — which the route would surface as a **500**. The check turns that
+  into `FileNotFoundError` → **503**, keeping the same contract the plate detector and YuNet already
+  honour. A unit test pins it (`test_fit_raises_file_not_found_when_the_model_is_missing`).
+- **A new `FaceResponse` — deliberately breaking Phase 10's "reuse `DetectionResponse`" call.** That
+  call was right when a face was just a box. A face is now a box *plus* optionally six point groups,
+  which a `DetectionResponse` cannot carry. The response nests rather than parallels
+  (`faces[].box` + `faces[].landmarks`) so a landmark set cannot drift away from the box it belongs
+  to. **This changes an already-shipped response shape**; Phase 10 is one unmerged PR away and has
+  no external consumers, so it was cheaper to fix now than to add a second endpoint.
+- **`?landmarks=true` on the existing endpoint, not a new one.** The model, the upload validation and
+  the failure modes are shared; only the depth of the result changes. Default `false` means the
+  54 MB model never loads for callers that do not ask.
+- **Groups named by iBUG-68 convention, i.e. the *subject's* right and left.** So `right_eyebrow`
+  renders on the **left** of the image. Renaming to viewer-relative would be friendlier to the
+  drawing code and wrong against every reference; a unit test and the real-photograph coordinates
+  both pin the convention instead.
+
+### The 503 problem, and a self-correcting answer
+
+Two models can now be missing independently, and the server deliberately does not say which — the
+503 detail is "A face model required by this request is not available". Leaking model filenames to
+the browser is not worth the diagnostic convenience, and parsing server prose in the client would be
+worse.
+
+So the client **steps down one level** on a face 503: *Facial features* → *Face boxes* → *Off*. If
+only the landmark model is missing, the next tick succeeds at *Face boxes* and stops there. If both
+are missing, one more tick steps to *Off*. The control settles on the highest mode that actually
+works without the client ever knowing which file is absent. A **plate** 503 still calls
+`stopCamera()`, unchanged from Phase 9.
+
+### Measured — `docs/benchmark/face-landmarks-phase11.md`
+
+| | Median | Budget |
+|---|---|---|
+| Fit, 1 face | **1.1 ms** | `<25 ms` ✅ **met** |
+| Fit, 3 faces | 3.3 ms | |
+| Per extra face | 1.1 ms | |
+| Detect + fit on a real photograph, serial | 7.6 ms | |
+
+Cold start is **495 ms** — the largest in the project, loading a 54 MB model — paid once per process,
+which is why the load is lazy and gated on the query parameter. The cost is **per-face** and linear;
+at 1.1 ms a face it would take ~17 faces in one frame for the landmark stage alone to reach the
+25 ms detection budget.
+
+Third stage to meet its budget, after RAG and face detection. Not on the `/recognize` path, so the
+4.1× total-pipeline miss that OCR dominates is unaffected.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| Landmarks on a **real photograph** | ✅ all six groups land on their features, visually confirmed on a rendered overlay |
+| Subject-right convention on **real model output** | ✅ `right_eyebrow` x 197–241 < `left_eyebrow` x 255–293; `right_eye` 212–232 < `left_eye` 261–281 |
+| Point counts per group | ✅ 5 / 5 / 9 / 6 / 6 / 20 (eyebrows, nose, eyes, mouth) — jaw's 17 absent |
+| Default request omits landmarks | ✅ `landmarks: null`, landmark model never loaded |
+| Missing landmark model + `?landmarks=true` | ✅ **503, not 500** — against a live server with the path pointed at a nonexistent file |
+| 415 / 413 / 400 mapping | ✅ unchanged |
+| Per-mode request sets in the browser | ✅ Off → `/detect` only; Face boxes → both; Facial features → both, with `?landmarks=true` |
+| 503 step-down | ✅ all three transitions observed live (features → boxes → off) |
+| Single `clearRect` per tick | ✅ landmarks draw inside the existing clear; boxes not erased |
+| `.toggle select` did not leak to `#file-input` | ✅ computed styles unchanged |
+| `/health`, `/detect`, `/recognize` regression + OpenAPI shape | ✅ 200 each, `landmarks` parameter present |
+| `pytest` / `ruff` / `black` / `mypy` | ✅ **124 passed** (112 + 12 new), all clean |
+
+Both browser passes force-reloaded the static assets first (Part I lesson) and `lsof` confirmed
+exactly one listener on the port before any live result was trusted (Part J lesson).
+
+### Deliberately not built
+
+- No jaw contour — dropped on purpose, see the scope boundary.
+- No recognition, embeddings, identity matching, or frame persistence — carried forward from Part J.
+- No landmarks in the **upload** flow, for the same reason Phase 10 kept faces out of it.
+- No per-group toggles; the three-state control is one axis of cost, not six.
+- No blink/gaze/expression derivation from the points — that is inference about a person, which is a
+  different feature with different consent questions.
+- No smoothing across frames. Landmarks jitter more than boxes do, and a temporal filter needs frame
+  history, which this phase deliberately does not keep.
+
+### ⚠️ Known gaps
+
+1. **Accuracy is one photograph.** A single frontal, well-lit, high-quality portrait fitted
+   correctly and was inspected visually. There is still **no camera device in this environment**, so
+   no face has been tracked in a live stream, at an angle, in motion, or in poor light. LBF is an
+   older, cheaper regressor, so off-frontal degradation is the *expected* failure mode and is
+   entirely unmeasured here.
+2. **The synthetic benchmark fits fabricated boxes on a noise frame.** That bounds the cost of a fit
+   — the regression does the same work wherever it is pointed — and says nothing about accuracy. The
+   real-photograph run is the only accuracy evidence.
+3. **Jitter is unquantified.** Point 6 above declines to build smoothing partly because the amount of
+   jitter has never been observed, there being no live stream to observe it in.
+4. **The model is gitignored** (`.gitignore:50`, `models/face/*.yaml`), so a fresh clone must run
+   `make fetch-face-landmark-model`. A blanket `*.yaml` was rejected — this repo has config YAML that
+   must stay tracked.
+5. **The 200 ms tick is measured against `127.0.0.1`** — carried forward from Part I unchanged.

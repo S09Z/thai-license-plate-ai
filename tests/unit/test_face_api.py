@@ -14,9 +14,10 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.core.config import get_settings
-from app.services.face_service import get_face_detector
+from app.services.face_service import get_face_detector, get_face_landmarker
 from detector.detector import Detection
 from face.detector import FaceDetector
+from face.landmarks import FaceLandmarker, FacialLandmarks
 
 
 def _png_bytes(width: int = 16, height: int = 8) -> bytes:
@@ -28,12 +29,14 @@ def _png_bytes(width: int = 16, height: int = 8) -> bytes:
 
 @pytest.fixture(autouse=True)
 def reset_singletons() -> Iterator[None]:
-    """Clear cached settings and the detector so env patches take effect."""
+    """Clear cached settings and the models so env patches take effect."""
     get_settings.cache_clear()
     get_face_detector.cache_clear()
+    get_face_landmarker.cache_clear()
     yield
     get_settings.cache_clear()
     get_face_detector.cache_clear()
+    get_face_landmarker.cache_clear()
 
 
 @pytest.fixture
@@ -48,6 +51,23 @@ def stub_faces(monkeypatch: pytest.MonkeyPatch) -> list[Detection]:
     return detections
 
 
+@pytest.fixture
+def stub_landmarks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch FaceLandmarker.fit to return a result without the model."""
+    fitted = FacialLandmarks(
+        right_eyebrow=[(4, 6)],
+        left_eyebrow=[(10, 6)],
+        nose=[(7, 9)],
+        right_eye=[(5, 8)],
+        left_eye=[(9, 8)],
+        mouth=[(7, 13)],
+    )
+
+    monkeypatch.setattr(
+        FaceLandmarker, "fit", lambda self, image, boxes: [fitted] * len(boxes)
+    )
+
+
 def test_detect_faces_returns_boxes_for_valid_png(
     client: TestClient, stub_faces: list[Detection]
 ) -> None:
@@ -59,7 +79,12 @@ def test_detect_faces_returns_boxes_for_valid_png(
     assert response.status_code == 200
     assert response.json() == {
         "count": 1,
-        "boxes": [{"x1": 3, "y1": 4, "x2": 13, "y2": 16, "confidence": 0.88}],
+        "faces": [
+            {
+                "box": {"x1": 3, "y1": 4, "x2": 13, "y2": 16, "confidence": 0.88},
+                "landmarks": None,
+            }
+        ],
     }
 
 
@@ -74,7 +99,71 @@ def test_detect_faces_returns_empty_when_no_faces(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"count": 0, "boxes": []}
+    assert response.json() == {"count": 0, "faces": []}
+
+
+def test_detect_faces_reports_landmarks_when_asked(
+    client: TestClient, stub_faces: list[Detection], stub_landmarks: None
+) -> None:
+    """``?landmarks=true`` adds the six named feature groups to each face."""
+    response = client.post(
+        "/detect/faces?landmarks=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    (face,) = response.json()["faces"]
+    assert face["box"]["x1"] == 3
+    assert face["landmarks"] == {
+        "right_eyebrow": [[4, 6]],
+        "left_eyebrow": [[10, 6]],
+        "nose": [[7, 9]],
+        "right_eye": [[5, 8]],
+        "left_eye": [[9, 8]],
+        "mouth": [[7, 13]],
+    }
+
+
+def test_detect_faces_ignores_the_landmark_model_by_default(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_faces: list[Detection],
+) -> None:
+    """Without the opt-in, a missing landmark model changes nothing."""
+    monkeypatch.setenv("APP_FACE_LANDMARK_MODEL_PATH", str(tmp_path / "absent.yaml"))
+    get_settings.cache_clear()
+    get_face_landmarker.cache_clear()
+
+    response = client.post(
+        "/detect/faces", files={"file": ("scene.png", _png_bytes(), "image/png")}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["faces"][0]["landmarks"] is None
+
+
+def test_detect_faces_reports_unavailable_when_landmark_model_missing(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_faces: list[Detection],
+) -> None:
+    """An opted-in request with no LBF model returns 503, not 500.
+
+    OpenCV raises its own ``cv2.error`` here, which would escape as a 500; this
+    is the check that keeps the 503 contract honest.
+    """
+    monkeypatch.setenv("APP_FACE_LANDMARK_MODEL_PATH", str(tmp_path / "absent.yaml"))
+    get_settings.cache_clear()
+    get_face_landmarker.cache_clear()
+
+    response = client.post(
+        "/detect/faces?landmarks=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 503
 
 
 def test_detect_faces_rejects_unsupported_content_type(
