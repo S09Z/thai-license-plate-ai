@@ -26,8 +26,13 @@
     <div id="camera-panel" hidden>
       <button type="button" id="start-camera-button">Start camera</button>
       <button type="button" id="stop-camera-button" hidden>Stop</button>
-      <label class="toggle" for="show-faces">
-        <input type="checkbox" id="show-faces"> Show faces
+      <label class="toggle" for="face-mode">
+        Faces
+        <select id="face-mode">
+          <option value="off" selected>Off</option>
+          <option value="boxes">Face boxes</option>
+          <option value="features">Facial features</option>
+        </select>
       </label>
       <div id="camera-stage" hidden>
         <video id="camera-feed" autoplay playsinline muted></video>

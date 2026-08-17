@@ -20,13 +20,33 @@ const stopCameraButton = document.getElementById("stop-camera-button");
 const uploadModeButton = document.getElementById("upload-mode-button");
 const cameraModeButton = document.getElementById("camera-mode-button");
 const cameraPanel = document.getElementById("camera-panel");
-const showFacesToggle = document.getElementById("show-faces");
+const faceModeSelect = document.getElementById("face-mode");
 
 const BOX_COLOUR = "#e0245e";
 // Faces are a different kind of thing from plates, so they get a different
 // colour rather than a different line style — colour survives a glance.
 const FACE_BOX_COLOUR = "#00b8d4";
 const BOX_WIDTH = 3;
+const FEATURE_WIDTH = 2;
+
+// Each group is stroked as a polyline in its own colour rather than as a cloud
+// of anonymous dots, so the overlay reads as "eyes, eyebrows, nose, mouth" at a
+// glance. `split` is the index where a group breaks into a second line: the
+// nose is a bridge then a nostril line, and the mouth is an outer then an inner
+// lip loop, so drawing either as one continuous path would zigzag across them.
+const FEATURE_STROKES = [
+  { group: "right_eyebrow", colour: "#ffb300", closed: false },
+  { group: "left_eyebrow", colour: "#ffb300", closed: false },
+  { group: "nose", colour: "#f5f5f5", closed: false, split: 4 },
+  { group: "right_eye", colour: "#7cfc00", closed: true },
+  { group: "left_eye", colour: "#7cfc00", closed: true },
+  { group: "mouth", colour: "#ff4081", closed: true, split: 12 },
+];
+
+// A face 503 steps the control down one level rather than off, because the
+// server cannot say which of the two models is missing; the next tick settles
+// it. Falling straight to "off" would hide working face boxes.
+const FACE_MODE_FALLBACK = { features: "boxes", boxes: "off" };
 const CAPTURE_INTERVAL_MS = 1500;
 // Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
 // refreshed far more often than the ~400ms full recognize pipeline allows.
@@ -39,9 +59,14 @@ const WEIGHTS_MISSING =
   "Detector model is not installed, so recognition cannot run yet. " +
   "Install trained plate weights at the configured detector path to enable it.";
 
-const FACE_MODEL_MISSING =
-  "Face detection model is not installed, so face boxes are unavailable. " +
-  "Fetch it with `make fetch-face-model` to enable them.";
+const FACE_MODEL_MISSING = {
+  boxes:
+    "A face model is not installed, so facial features are unavailable. " +
+    "Showing face boxes only; fetch it with `make fetch-face-landmark-model`.",
+  off:
+    "Face detection model is not installed, so face overlays are unavailable. " +
+    "Fetch it with `make fetch-face-model` to enable them.",
+};
 
 let loadedImage = null;
 let objectUrl = null;
@@ -220,22 +245,27 @@ async function detectOnly(file) {
 
 /** Post the file to /detect/faces, raising a readable error on failure.
  *
- * Parallel to detectOnly() above, with its own 503 wording: a missing face
- * model is a different missing file from a missing plate detector, and the
- * message has to tell someone which one to install.
+ * Parallel to detectOnly() above, but every error it raises is tagged
+ * `faces: true`: a missing face model must not be mistaken for a missing plate
+ * detector, since only one of those is worth stopping the camera over.
+ *
+ * @param {File} file The captured frame.
+ * @param {boolean} landmarks Whether to ask for feature points as well.
  */
-async function detectFaces(file) {
+async function detectFaces(file, landmarks) {
   const body = new FormData();
   body.append("file", file);
 
-  const response = await fetch("/detect/faces", { method: "POST", body });
+  const url = landmarks ? "/detect/faces?landmarks=true" : "/detect/faces";
+  const response = await fetch(url, { method: "POST", body });
   if (response.ok) {
     return response.json();
   }
 
   if (response.status === 503) {
-    const error = new Error(FACE_MODEL_MISSING);
+    const error = new Error("A face model is not available.");
     error.status = response.status;
+    error.faces = true;
     throw error;
   }
 
@@ -250,6 +280,7 @@ async function detectFaces(file) {
   }
   const error = new Error(detail);
   error.status = response.status;
+  error.faces = true;
   throw error;
 }
 
@@ -400,8 +431,48 @@ function drawTrackingBoxes(plates, faces) {
   });
 
   context.strokeStyle = FACE_BOX_COLOUR;
-  faces.forEach(({ x1, y1, x2, y2 }) => {
-    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+  faces.forEach(({ box }) => {
+    context.strokeRect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
+  });
+
+  faces.forEach(({ landmarks }) => {
+    if (landmarks) {
+      drawLandmarks(context, landmarks);
+    }
+  });
+}
+
+/** Stroke one run of landmark points as a single path.
+ *
+ * @param {CanvasRenderingContext2D} context Overlay context.
+ * @param {Array<Array<number>>} points `[x, y]` pairs in frame coordinates.
+ * @param {boolean} closed Whether to join the last point back to the first.
+ */
+function strokePolyline(context, points, closed) {
+  if (points.length < 2) {
+    return;
+  }
+  context.beginPath();
+  context.moveTo(points[0][0], points[0][1]);
+  points.slice(1).forEach(([x, y]) => context.lineTo(x, y));
+  if (closed) {
+    context.closePath();
+  }
+  context.stroke();
+}
+
+/** Draw the named feature groups of one face onto the overlay.
+ *
+ * Called from inside drawTrackingBoxes(), after the single clearRect() that
+ * tick is allowed — clearing again here would erase the plate boxes.
+ */
+function drawLandmarks(context, landmarks) {
+  context.lineWidth = FEATURE_WIDTH;
+  FEATURE_STROKES.forEach(({ group, colour, closed, split }) => {
+    const points = landmarks[group] ?? [];
+    context.strokeStyle = colour;
+    const runs = split ? [points.slice(0, split), points.slice(split)] : [points];
+    runs.forEach((run) => strokePolyline(context, run, closed));
   });
 }
 
@@ -416,20 +487,25 @@ async function trackLoop() {
     // The frame is built once and shared by both requests, which are issued
     // concurrently so a tick costs one round trip's latency rather than two.
     const file = await frameToFile(captureFrame());
-    const wantFaces = showFacesToggle.checked;
+    // Facial features ride along on the face request as a query parameter, so
+    // the richer mode still costs one face round trip, not two.
+    const faceMode = faceModeSelect.value;
     const [plates, faces] = await Promise.all([
       detectOnly(file),
-      wantFaces ? detectFaces(file) : Promise.resolve({ boxes: [] }),
+      faceMode === "off"
+        ? Promise.resolve({ faces: [] })
+        : detectFaces(file, faceMode === "features"),
     ]);
-    drawTrackingBoxes(plates.boxes, faces.boxes);
+    drawTrackingBoxes(plates.boxes, faces.faces);
   } catch (error) {
     if (error.status === 503) {
       // A missing face model disables only the overlay it powers; plate
-      // tracking still works, so the session keeps running with the box
-      // unticked. A missing plate detector still stops everything.
-      if (error.message === FACE_MODEL_MISSING) {
-        showFacesToggle.checked = false;
-        setStatus(error.message, "error");
+      // tracking still works, so the session keeps running one mode lower.
+      // A missing plate detector still stops everything.
+      if (error.faces) {
+        const fallback = FACE_MODE_FALLBACK[faceModeSelect.value] ?? "off";
+        faceModeSelect.value = fallback;
+        setStatus(FACE_MODEL_MISSING[fallback], "error");
       } else {
         stopCamera();
         return;

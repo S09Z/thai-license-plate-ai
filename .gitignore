@@ -46,6 +46,8 @@ htmlcov/
 *.pth
 *.onnx
 *.engine
+# Scoped rather than a bare `*.yaml`, which would swallow real config files.
+models/face/*.yaml
 
 # Datasets (raw data is immutable and lives outside git)
 datasets/raw/
