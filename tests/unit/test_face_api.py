@@ -6,6 +6,7 @@ ONNX model.
 
 import io
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -53,8 +54,12 @@ def stub_faces(monkeypatch: pytest.MonkeyPatch) -> list[Detection]:
 
 @pytest.fixture
 def stub_landmarks(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Patch FaceLandmarker.fit to return a result without the model."""
-    fitted = FacialLandmarks(
+    """Patch FaceLandmarker.fit to return a result without the model.
+
+    The stub honours ``mesh`` rather than ignoring it, so the tests exercise
+    the flag the route actually forwards.
+    """
+    features = FacialLandmarks(
         right_eyebrow=[(4, 6)],
         left_eyebrow=[(10, 6)],
         nose=[(7, 9)],
@@ -62,10 +67,23 @@ def stub_landmarks(monkeypatch: pytest.MonkeyPatch) -> None:
         left_eye=[(9, 8)],
         mouth=[(7, 13)],
     )
-
-    monkeypatch.setattr(
-        FaceLandmarker, "fit", lambda self, image, boxes: [fitted] * len(boxes)
+    meshed = replace(
+        features,
+        jaw=[(3, 10)],
+        points=[(4, 6), (10, 6), (7, 9), (5, 8), (9, 8), (7, 13), (3, 10)],
+        triangles=[(0, 1, 2), (2, 3, 4)],
     )
+
+    def _fake_fit(
+        self: FaceLandmarker,
+        image: np.ndarray,
+        boxes: list[Detection],
+        *,
+        mesh: bool = False,
+    ) -> list[FacialLandmarks]:
+        return [meshed if mesh else features] * len(boxes)
+
+    monkeypatch.setattr(FaceLandmarker, "fit", _fake_fit)
 
 
 def test_detect_faces_returns_boxes_for_valid_png(
@@ -105,7 +123,11 @@ def test_detect_faces_returns_empty_when_no_faces(
 def test_detect_faces_reports_landmarks_when_asked(
     client: TestClient, stub_faces: list[Detection], stub_landmarks: None
 ) -> None:
-    """``?landmarks=true`` adds the six named feature groups to each face."""
+    """``?landmarks=true`` adds the six named feature groups to each face.
+
+    The exact comparison is deliberate: the three null mesh keys are what
+    proves the jaw stays behind its own flag rather than riding along here.
+    """
     response = client.post(
         "/detect/faces?landmarks=true",
         files={"file": ("scene.png", _png_bytes(), "image/png")},
@@ -121,7 +143,47 @@ def test_detect_faces_reports_landmarks_when_asked(
         "right_eye": [[5, 8]],
         "left_eye": [[9, 8]],
         "mouth": [[7, 13]],
+        "jaw": None,
+        "points": None,
+        "triangles": None,
     }
+
+
+def test_detect_faces_reports_the_mesh_when_asked(
+    client: TestClient, stub_faces: list[Detection], stub_landmarks: None
+) -> None:
+    """``?mesh=true`` adds the jaw, the flat point array and its triangles."""
+    response = client.post(
+        "/detect/faces?mesh=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    (face,) = response.json()["faces"]
+    assert face["landmarks"]["jaw"] == [[3, 10]]
+    assert face["landmarks"]["triangles"] == [[0, 1, 2], [2, 3, 4]]
+    assert len(face["landmarks"]["points"]) == 7
+    # The six feature groups are still reported, so mesh is a superset rather
+    # than a different response the client has to special-case.
+    assert face["landmarks"]["mouth"] == [[7, 13]]
+
+
+def test_detect_faces_mesh_needs_the_landmark_model(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_faces: list[Detection],
+) -> None:
+    """Mesh implies fitting, so a missing model is still a 503 not a 500."""
+    monkeypatch.setenv("APP_FACE_LANDMARK_MODEL_PATH", str(tmp_path / "absent.yaml"))
+    get_settings.cache_clear()
+
+    response = client.post(
+        "/detect/faces?mesh=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 503
 
 
 def test_detect_faces_ignores_the_landmark_model_by_default(
