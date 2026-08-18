@@ -37,6 +37,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 9 ✅ | Realtime tracking | `web/static/` | — | done — `/detect` at 200 ms strokes boxes over the live video; `/recognize` stays at 1.5 s for the table (see Part I.2) |
 | 10 ✅ | Face detection boxes | `face/`, `app/api/face.py`, `web/static/` | — (opencv's bundled YuNet) | done — `POST /detect/faces`, opt-in overlay beside plate boxes; **17.6ms vs <25ms budget — met (see Part J)** |
 | 11 ✅ | Facial landmarks | `face/landmarks.py`, `app/schemas/face.py`, `web/static/` | — (opencv contrib's Facemark LBF) | done — `?landmarks=true` fits eyebrows/eyes/nose/mouth; **1.1ms per face vs <25ms budget — met (see Part K)** |
+| 12 ✅ | Whole-face mesh | `face/landmarks.py`, `web/static/` | — (opencv's `cv2.Subdiv2D`) | done — `?mesh=true` adds the jaw and a Delaunay wireframe over all 68 points; **0.4ms on top of the fit, 20.1ms serial vs <25ms — met (see Part L)** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -751,6 +752,11 @@ jaw contour is the most identity-bearing part of the 68 — face shape is what a
 matcher keys on — and it is not one of the four features the phase asked for. Discarding it costs
 nothing here and removes the most obviously misusable output.
 
+> **⚠️ Reversed by Phase 12.** The jaw is no longer dropped unconditionally: `?mesh=true` reports
+> it, because a whole-face surface has no boundary without it. The reasoning above still stands and
+> is why the mesh is a *fourth, opt-in mode* rather than a widening of `?landmarks=true`, which
+> still returns no jaw. See Part L.
+
 ### Decisions
 
 - **Facemark LBF over dlib or MediaPipe.** LBF ships in the `opencv-contrib-python` already in the
@@ -853,3 +859,118 @@ exactly one listener on the port before any live result was trusted (Part J less
    `make fetch-face-landmark-model`. A blanket `*.yaml` was rejected — this repo has config YAML that
    must stay tracked.
 5. **The 200 ms tick is measured against `127.0.0.1`** — carried forward from Part I unchanged.
+
+---
+
+## Part L — Whole-Face Mesh Slice (✅ shipped 2026-08-07)
+
+Phase 11 put **points** inside the face box. This joins them into a **surface**: a Delaunay
+triangulation over all 68 landmarks, stroked as a wireframe. The face control becomes four-state —
+Off / Face boxes / Facial features / Face mesh — and each step is still opt-in.
+
+### The Part K jaw decision is deliberately reversed
+
+Part K dropped jaw points 0–16 at the wrapper boundary and argued that discarding them "costs
+nothing here". For a mesh it costs everything: the jaw *is* the face boundary, and without it the
+triangulation covers only the middle of the face.
+
+So the jaw is back — but the reasoning that removed it was sound and is preserved structurally
+rather than discarded:
+
+- **`?landmarks=true` is byte-for-byte unchanged.** It still returns six feature groups and no jaw.
+  The API test asserts the response dict **exactly**, so the three new keys appear there as `null`;
+  that exact comparison is what proves the default did not quietly widen.
+- **The jaw is reachable only through `?mesh=true`.** One flag, one decision, visible in the request.
+- **`test_fit_omits_the_jaw_contour_by_default`** was kept, not deleted, and narrowed to the default
+  path. It is now the regression test for the privacy default rather than a statement that the jaw
+  is never computed.
+
+This is a real reversal of a documented decision, recorded as one. Part K carries a pointer here.
+
+### Decisions
+
+- **`cv2.Subdiv2D` over a dense 468-point FaceMesh.** Subdiv2D is in the pinned OpenCV 4.10.0, so
+  the mesh adds **no new dependency and no new model** — the same reasoning that picked YuNet in
+  Phase 10 and Facemark LBF in Phase 11. MediaPipe FaceMesh has Apache-2.0 weights, but its ONNX
+  exports fuse custom ops `cv2.dnn` will not load, so it would pull in `onnxruntime`. Deferred to
+  its own phase, with evidence, rather than smuggled in here.
+- **Triangles are index triples into a flat 68-point array, not coordinate triples.** A quarter of
+  the payload, and the topology can be checked against points the client already has. `points` is
+  sent explicitly instead of asking clients to concatenate the seven groups in iBUG order — that
+  ordering would be an invisible contract no test could catch if it drifted.
+- **Triangulated server-side.** It is testable in pytest; the repo has no JS test infrastructure,
+  so the same logic in the browser would ship unverified.
+- **The Subdiv2D rectangle comes from the points, not the face box.** Not a style choice: **1 of 68
+  fitted points fell outside the detection box** on the reference photograph, and Subdiv2D raises on
+  any insert outside its rectangle.
+- **The renderer is chosen by the data, not the dropdown** — `landmarks.triangles ? drawMesh :
+  drawLandmarks`. The mode that produced a response is already encoded in it, and reading the
+  control at draw time could disagree with the frame in hand.
+
+### Measured — `docs/benchmark/face-mesh-phase12.md`
+
+| | Median | Budget |
+|---|---|---|
+| Fit, 1 face | 1.5 ms | |
+| Fit + mesh, 1 face | 1.9 ms | |
+| **Mesh overhead** | **0.4 ms** | |
+| Detect + fit + mesh, serial | **20.1 ms** | `<25 ms` ✅ **met** |
+
+**A 4× win came out of the benchmark, not the design.** The first implementation triangulated in
+1.75 ms; profiling showed OpenCV's share was 0.04 ms and the rest was the index-mapping loop.
+`getTriangleList()` returns a numpy array, so iterating it directly yields `numpy.float32` scalars,
+and hashing those as dict keys costs ~7× native floats. One `.tolist()` took it to 0.23 ms with
+byte-identical output. The call is commented as load-bearing, because it looks removable.
+
+### Verified
+
+| Check | Result |
+|---|---|
+| `?mesh=true` on the **real photograph** | ✅ 17 jaw points, 68 flat points, **113 triangles** |
+| Triangle indices | ✅ 0–67, all valid, 3 distinct per triangle, all 68 points used |
+| iBUG order of `points` | ✅ `points[0:17] == jaw`, `points[48:68] == mouth` |
+| `?landmarks=true` privacy gate | ✅ `jaw`, `points`, `triangles` all `null`; mouth still present |
+| No flag | ✅ `landmarks: null`, unchanged |
+| 415 / 413 / 400 mapping with `?mesh=true` | ✅ all three |
+| Missing LBF model → 503, path not leaked | ✅ `?mesh=true` **and** `?landmarks=true` 503; boxes-only 200 |
+| OpenAPI exposes both params | ✅ `['landmarks', 'mesh']` |
+| Mesh rendered on the portrait and **looked at** | ✅ boundary traces the jaw, surface is connected |
+| Browser: four modes → correct URLs | ✅ `/detect/faces`, `?landmarks=true`, `?mesh=true` |
+| Browser: data-driven dispatch | ✅ features response draws 0 mesh-coloured pixels; mesh response draws them |
+| Single `clearRect` per tick | ✅ 1 call; all 6 feature colours drawn, **0 survive** into the next (mesh) tick |
+| Plate boxes still visible under the mesh | ✅ `#e0245e` present alongside the wireframe |
+| `pytest` / `ruff` / `black` / `mypy` | ✅ **133 passed** (124 + 9 new), all clean |
+
+The browser pass force-reloaded the static assets first, per the Part I lesson — the first
+navigation showed 1 console error and 0 after. **Two stale `uvicorn` processes were again bound to
+port 8000**; rather than kill what may be the user's own server, every check ran against a
+purpose-started process on port 8010, confirmed to be the only listener there.
+
+### Deliberately not built
+
+- **No dense 468-point surface.** 68 points is a coarse mesh; a smooth one is a separate phase with
+  a real dependency decision (see Decisions).
+- **No filled/shaded triangles.** A wireframe shows the topology; a filled surface would hide the
+  video it is drawn over.
+- **No mesh in the upload flow**, matching Phases 10–11: `/recognize` has its own response shape.
+- **No temporal smoothing.** Carried forward from Part K unchanged.
+- **No expression/attribute inference.** Researched (FER+ is the candidate, MIT, 3.7 ms per face)
+  but not built, and out of scope here.
+
+### ⚠️ Known gaps
+
+1. **"Whole face" means jaw-to-eyebrow.** iBUG-68 has **no forehead or scalp points**, so the convex
+   hull of the 68 is the mesh boundary and the forehead is not covered. Visible in the rendered
+   check. This is a property of the landmark set, not a bug, and it is the main reason a dense
+   FaceMesh might still be wanted.
+2. **Topology may flicker on live video.** Delaunay is recomputed per frame, so near-cocircular
+   points can flip triangles between ticks. Landmark jitter was already unquantified in Part K, and
+   with no camera device here this remains **unobserved rather than ruled out**. The fallback, if it
+   looks bad, is to freeze the topology from a reference shape and reuse the index list.
+3. **Still no camera device in this environment** — carried forward from Parts J and K. Every check
+   is a still photograph or an injected payload; nothing has run against a live stream.
+4. **Accuracy is one photograph.** 113 triangles on one frontal, well-lit portrait. The mesh is only
+   as good as the fit under it, and off-frontal LBF degradation remains unmeasured.
+5. **Payload grows to ~2.8 KB per meshed face**, versus a few hundred bytes for boxes. Fine at the
+   200 ms tick over loopback; unmeasured over a real network, like every latency figure since
+   Part I.

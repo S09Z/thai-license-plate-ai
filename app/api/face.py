@@ -22,6 +22,11 @@ async def detect_faces_route(
     landmarks: bool = Query(
         False, description="Fit eyebrow, eye, nose and mouth points inside each face."
     ),
+    mesh: bool = Query(
+        False,
+        description="Also report the jaw contour and a Delaunay triangulation "
+        "of all 68 points. Implies landmark fitting.",
+    ),
 ) -> FaceResponse:
     """Detect human faces in an uploaded image.
 
@@ -30,6 +35,9 @@ async def detect_faces_route(
         landmarks: Opt in to feature points. Off by default: fitting costs
             extra CPU per face and needs a model the endpoint otherwise never
             touches.
+        mesh: Opt in to the whole-face surface. Separate from ``landmarks``
+            because it adds the jaw, and face shape is the most
+            identity-bearing part of the 68 points.
 
     Returns:
         A :class:`FaceResponse` with the detected faces.
@@ -42,7 +50,9 @@ async def detect_faces_route(
     data = await file.read()
 
     try:
-        return detect_faces(data, file.content_type or "", landmarks=landmarks)
+        return detect_faces(
+            data, file.content_type or "", landmarks=landmarks, mesh=mesh
+        )
     except UnsupportedImageTypeError as error:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(error)

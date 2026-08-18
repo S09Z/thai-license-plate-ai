@@ -45,9 +45,22 @@ def _indexed_face() -> np.ndarray:
 
     Encoding the index into the coordinates makes a mis-sliced group visible in
     the assertion itself rather than as an off-by-one nobody notices.
+
+    Note these points are collinear, which is fine for grouping tests but
+    degenerate for triangulation; mesh tests use :func:`_scattered_face`.
     """
     points = [(float(index), float(100 + index)) for index in range(68)]
     return np.array([points], dtype=np.float32)
+
+
+def _scattered_face(seed: int = 0) -> np.ndarray:
+    """Return one 1x68x2 face of non-collinear points in general position.
+
+    Delaunay needs points that are not all on one line, so the grouping
+    fixture's diagonal cannot be reused for mesh assertions.
+    """
+    rng = np.random.default_rng(seed)
+    return rng.integers(0, 200, size=(1, 68, 2)).astype(np.float32)
 
 
 @pytest.fixture
@@ -84,14 +97,19 @@ def test_fit_groups_points_into_the_four_requested_features(
     assert result.mouth == [(index, 100 + index) for index in _MOUTH]
 
 
-def test_fit_omits_the_jaw_contour(
+def test_fit_omits_the_jaw_contour_by_default(
     monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
 ) -> None:
-    """Points 0-16 trace the jaw, which is not one of the requested features."""
+    """Points 0-16 trace the jaw and stay out of the default response.
+
+    The mesh mode reports them on request, so this is the regression test that
+    opting in is still required and the default did not quietly widen.
+    """
     model = _FakeFacemark([_indexed_face()])
 
     (result,) = _fitter(monkeypatch, model).fit(image, [box])
 
+    assert result.jaw is None
     reported = {
         point
         for group in (
@@ -208,3 +226,112 @@ def test_fit_raises_file_not_found_when_the_model_is_missing(
 
     with pytest.raises(FileNotFoundError, match=str(missing)):
         FaceLandmarker(str(missing)).fit(image, [box])
+
+
+def test_mesh_reports_the_jaw_when_requested(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """``mesh=True`` opts into the face boundary the default withholds."""
+    model = _FakeFacemark([_indexed_face()])
+
+    (result,) = _fitter(monkeypatch, model).fit(image, [box], mesh=True)
+
+    assert result.jaw == [(index, 100 + index) for index in range(17)]
+
+
+def test_mesh_reports_all_sixty_eight_points_in_ibug_order(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """``points`` is the flat array the triangle indices refer into.
+
+    Clients could concatenate the seven groups themselves, but that ordering
+    would be an invisible contract no test could catch if it drifted.
+    """
+    model = _FakeFacemark([_indexed_face()])
+
+    (result,) = _fitter(monkeypatch, model).fit(image, [box], mesh=True)
+
+    assert result.points == [(index, 100 + index) for index in range(68)]
+    assert result.points is not None
+    assert result.points[0:17] == result.jaw
+    assert result.points[48:68] == result.mouth
+
+
+def test_mesh_triangle_indices_stay_inside_the_point_array(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """Subdiv2D's virtual outer rectangle must not leak into the output.
+
+    ``getTriangleList`` returns triangles touching that rectangle; unfiltered,
+    their vertices are not landmarks at all and index nothing.
+    """
+    model = _FakeFacemark([_scattered_face()])
+
+    (result,) = _fitter(monkeypatch, model).fit(image, [box], mesh=True)
+
+    assert result.triangles
+    for triangle in result.triangles:
+        assert len(set(triangle)) == 3
+        assert all(0 <= index < 68 for index in triangle)
+
+
+def test_mesh_uses_every_landmark(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """Points in general position all take part in the triangulation."""
+    model = _FakeFacemark([_scattered_face()])
+
+    (result,) = _fitter(monkeypatch, model).fit(image, [box], mesh=True)
+
+    assert result.triangles is not None
+    assert {index for triangle in result.triangles for index in triangle} == set(
+        range(68)
+    )
+
+
+def test_mesh_survives_degenerate_points(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """Collinear or coincident fits produce no triangles rather than raising.
+
+    A failed fit can return points that share a coordinate or fall on one line;
+    that is a bad frame, not a server error.
+    """
+    collinear = _FakeFacemark([_indexed_face()])
+    coincident = _FakeFacemark([np.full((1, 68, 2), 50.0, dtype=np.float32)])
+
+    (flat,) = _fitter(monkeypatch, collinear).fit(image, [box], mesh=True)
+    (stacked,) = _fitter(monkeypatch, coincident).fit(image, [box], mesh=True)
+
+    assert flat.triangles == []
+    assert stacked.triangles == []
+
+
+def test_mesh_accepts_points_outside_the_face_box(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """The triangulation bounds come from the points, not the detection box.
+
+    Fitted points routinely fall outside the box that seeded them, and
+    Subdiv2D raises on any insert outside its rectangle.
+    """
+    points = _scattered_face()
+    points[0][0] = (box.x1 - 40.0, box.y1 - 40.0)
+    points[0][1] = (box.x2 + 40.0, box.y2 + 40.0)
+
+    (result,) = _fitter(monkeypatch, _FakeFacemark([points])).fit(
+        image, [box], mesh=True
+    )
+
+    assert result.triangles
+
+
+def test_fit_leaves_the_mesh_fields_unset_by_default(
+    monkeypatch: pytest.MonkeyPatch, image: np.ndarray, box: Detection
+) -> None:
+    """Not asking for the mesh costs nothing and reports nothing extra."""
+    model = _FakeFacemark([_scattered_face()])
+
+    (result,) = _fitter(monkeypatch, model).fit(image, [box])
+
+    assert (result.jaw, result.points, result.triangles) == (None, None, None)
