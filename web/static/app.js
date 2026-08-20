@@ -15,6 +15,7 @@ const resultsBody = document.getElementById("results-body");
 const cameraFeed = document.getElementById("camera-feed");
 const cameraStage = document.getElementById("camera-stage");
 const trackingOverlay = document.getElementById("tracking-overlay");
+const faceOverlay = document.getElementById("face-overlay");
 const startCameraButton = document.getElementById("start-camera-button");
 const stopCameraButton = document.getElementById("stop-camera-button");
 const uploadModeButton = document.getElementById("upload-mode-button");
@@ -56,6 +57,11 @@ const CAPTURE_INTERVAL_MS = 1500;
 // Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
 // refreshed far more often than the ~400ms full recognize pipeline allows.
 const TRACK_INTERVAL_MS = 200;
+// The fast face path asks the server to downscale first, which brings a 720p
+// face detection from ~18ms down to ~3ms (docs/benchmark/face-fast-phase13.md).
+// At that cost a tick can target the camera's 60fps cadence, so boxes follow a
+// moving face instead of updating at the 200ms plate cadence.
+const FACE_FAST_MS = 16;
 
 // Only 503 is reworded: the API's "Detector model is not available" is accurate
 // but does not tell someone looking at a browser what to do about it. Every
@@ -262,18 +268,22 @@ async function detectOnly(file) {
  * @param {File} file The captured frame.
  * @param {boolean} landmarks Whether to ask for feature points as well.
  * @param {boolean} mesh Whether to ask for the whole-face triangulation.
+ * @param {boolean} fast Whether to ask the server to downscale for speed.
  */
-async function detectFaces(file, landmarks, mesh) {
+async function detectFaces(file, landmarks, mesh, fast) {
   const body = new FormData();
   body.append("file", file);
 
   // `mesh` already implies fitting server-side, so it wins outright rather
-  // than being combined with `landmarks`.
+  // than being combined with `landmarks`. `fast` is the boxes-only path: the
+  // only time a client wants the downscale trade is when it only needs a box.
   let url = "/detect/faces";
   if (mesh) {
     url = "/detect/faces?mesh=true";
   } else if (landmarks) {
     url = "/detect/faces?landmarks=true";
+  } else if (fast) {
+    url = "/detect/faces?fast=true";
   }
   const response = await fetch(url, { method: "POST", body });
   if (response.ok) {
@@ -354,11 +364,16 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-// Live camera capture. Two loops run while the camera is on:
+// Live camera capture. Three self-scheduling loops run while the camera is on,
+// each posting from a fresh captured frame and each throwing - never touching
+// another loop's overlay:
 //
-//   - the track loop hits /detect every 200ms and strokes the boxes onto a
-//     transparent canvas over the still-playing video, so a box follows a
-//     moving plate;
+//   - the track loop hits /detect every 200ms and strokes the plate boxes onto
+//     the plate overlay, so a box follows a moving plate;
+//   - the face loop hits /detect/faces and strokes onto its own overlay, on top
+//     of the plates'. It stays at the 200ms cadence for the rich feature/mesh
+//     modes and speeds up to ~16ms (targeting 60fps) for plain face boxes,
+//     where the server's ?fast=true downscale keeps each tick cheap;
 //   - the recognize loop hits /recognize every 1.5s and refreshes the results
 //     table, which is all the slow full pipeline is needed for here.
 //
@@ -367,6 +382,7 @@ form.addEventListener("submit", async (event) => {
 let cameraStream = null;
 let captureTimer = null;
 let trackTimer = null;
+let faceTimer = null;
 let capturing = false;
 
 /** Request the camera, show the live feed, and start the capture loop. */
@@ -390,20 +406,24 @@ async function startCamera() {
 
   // Box coordinates come back in source-frame pixels, so the overlay is sized
   // to the video's native resolution and left for CSS to scale — the same 1:1
-  // trick drawScene() uses for uploads.
+  // trick drawScene() uses for uploads. Both sheets share the frame size.
   trackingOverlay.width = cameraFeed.videoWidth;
   trackingOverlay.height = cameraFeed.videoHeight;
+  faceOverlay.width = cameraFeed.videoWidth;
+  faceOverlay.height = cameraFeed.videoHeight;
 
   capturing = true;
   captureAndRecognize();
   trackLoop();
+  faceLoop();
 }
 
-/** Stop both loops and release the camera. */
+/** Stop all three loops and release the camera. */
 function stopCamera() {
   capturing = false;
   clearTimeout(captureTimer);
   clearTimeout(trackTimer);
+  clearTimeout(faceTimer);
   if (cameraStream) {
     cameraStream.getTracks().forEach((track) => track.stop());
     cameraStream = null;
@@ -430,32 +450,43 @@ async function frameToFile(frame) {
 }
 
 /**
- * Replace the overlay's boxes with this frame's.
+ * Replace the plate overlay's boxes with the latest detection.
  *
  * No row numbers here, unlike drawScene(): at this cadence a box has no stable
  * correspondence to a row in the (much slower) results table, so a number would
  * point at the wrong plate more often than the right one.
  */
-function drawTrackingBoxes(plates, faces) {
+function drawPlateBoxes(plates) {
   const context = trackingOverlay.getContext("2d");
-  // One clear for both kinds of box. Clearing per-kind would mean the second
-  // draw erased the first, leaving only whichever ran last on screen.
   context.clearRect(0, 0, trackingOverlay.width, trackingOverlay.height);
   context.lineWidth = BOX_WIDTH;
-
   context.strokeStyle = BOX_COLOUR;
   plates.forEach(({ x1, y1, x2, y2 }) => {
     context.strokeRect(x1, y1, x2 - x1, y2 - y1);
   });
+}
 
+/**
+ * Replace the face overlay's contents — boxes, and any requested landmarks or
+ * mesh — with the frame's.
+ *
+ * Drawn on its own overlay, so the fast (boxes) branch can clear and redraw
+ * this layer without touching the plate boxes on the sheet below.
+ *
+ * Which renderer runs is decided by what the response carries, not by the
+ * dropdown: the mode that produced the data is already encoded in it, and
+ * reading the control here could disagree with the frame in hand.
+ */
+function drawFaces(faces) {
+  const context = faceOverlay.getContext("2d");
+  context.clearRect(0, 0, faceOverlay.width, faceOverlay.height);
+  context.lineWidth = BOX_WIDTH;
   context.strokeStyle = FACE_BOX_COLOUR;
+
   faces.forEach(({ box }) => {
     context.strokeRect(box.x1, box.y1, box.x2 - box.x1, box.y2 - box.y1);
   });
 
-  // Which renderer runs is decided by what the response carries, not by the
-  // dropdown: the mode that produced the data is already encoded in it, and
-  // reading the control here could disagree with the frame in hand.
   faces.forEach(({ landmarks }) => {
     if (!landmarks) {
       return;
@@ -489,8 +520,8 @@ function strokePolyline(context, points, closed) {
 
 /** Draw the named feature groups of one face onto the overlay.
  *
- * Called from inside drawTrackingBoxes(), after the single clearRect() that
- * tick is allowed — clearing again here would erase the plate boxes.
+ * Called from inside drawFaces(), after the face overlay's own clearRect() —
+ * clearing again here would erase the box drawn above these points.
  */
 function drawLandmarks(context, landmarks) {
   context.lineWidth = FEATURE_WIDTH;
@@ -507,7 +538,7 @@ function drawLandmarks(context, landmarks) {
  * The server sends triangles as index triples into `points` rather than as
  * coordinates, so the topology arrives at a quarter of the payload.
  *
- * Like drawLandmarks(), this runs after the tick's single clearRect().
+ * Like drawLandmarks(), this runs after the face overlay's own clearRect().
  */
 function drawMesh(context, landmarks) {
   const points = landmarks.points ?? [];
@@ -523,46 +554,75 @@ function drawMesh(context, landmarks) {
 }
 
 /**
- * Redraw the tracking boxes from the current frame, then schedule the next tick.
+ * Refresh the plate boxes from the current frame, then schedule the next tick.
  *
  * The next tick is scheduled only once this one has resolved, so a slow response
- * stretches the cadence instead of stacking requests behind each other.
+ * stretches the cadence instead of stacking requests behind each other. Faces
+ * live on their own overlay and their own loop, so they never share this
+ * cadence and never risk being erased by it.
  */
 async function trackLoop() {
   try {
-    // The frame is built once and shared by both requests, which are issued
-    // concurrently so a tick costs one round trip's latency rather than two.
     const file = await frameToFile(captureFrame());
-    // Facial features ride along on the face request as a query parameter, so
-    // the richer mode still costs one face round trip, not two.
-    const faceMode = faceModeSelect.value;
-    const [plates, faces] = await Promise.all([
-      detectOnly(file),
-      faceMode === "off"
-        ? Promise.resolve({ faces: [] })
-        : detectFaces(file, faceMode === "features", faceMode === "mesh"),
-    ]);
-    drawTrackingBoxes(plates.boxes, faces.faces);
+    const plates = await detectOnly(file);
+    drawPlateBoxes(plates.boxes);
   } catch (error) {
     if (error.status === 503) {
-      // A missing face model disables only the overlay it powers; plate
-      // tracking still works, so the session keeps running one mode lower.
-      // A missing plate detector still stops everything.
-      if (error.faces) {
-        const fallback = FACE_MODE_FALLBACK[faceModeSelect.value] ?? "off";
-        faceModeSelect.value = fallback;
-        setStatus(FACE_MODEL_MISSING[fallback], "error");
-      } else {
-        stopCamera();
-        return;
-      }
+      // A missing plate detector makes every future tick fail the same way,
+      // so stop the whole session rather than hammer a known-broken endpoint.
+      stopCamera();
+      return;
     }
     // One dropped tick is not worth taking over the status line the recognize
-    // loop owns; the boxes simply stay put until the next frame lands.
+    // loop owns; the plate boxes simply stay put until the next frame lands.
   }
 
   if (capturing) {
     trackTimer = setTimeout(trackLoop, TRACK_INTERVAL_MS);
+  }
+}
+
+/**
+ * Refresh the face overlay from the current frame, then schedule the next tick.
+ *
+ * The cadence follows the control: plain boxes ask the server to downscale
+ * (`?fast=true`, ~3ms detection — see docs/benchmark/face-fast-phase13.md) so
+ * they can run toward the camera's 60fps rate, while the richer feature and
+ * mesh modes stay at the 200ms plate cadence because their precision depends on
+ * full-resolution fitting. One loop covers all three so the overlay is never
+ * drawn from two loops that could fight over it.
+ */
+function faceLoopIntervalMs(mode) {
+  return mode === "boxes" ? FACE_FAST_MS : TRACK_INTERVAL_MS;
+}
+
+async function faceLoop() {
+  const mode = faceModeSelect.value;
+
+  if (mode !== "off") {
+    try {
+      const file = await frameToFile(captureFrame());
+      const result = await detectFaces(
+        file,
+        mode === "features",
+        mode === "mesh",
+        mode === "boxes",
+      );
+      drawFaces(result.faces);
+    } catch (error) {
+      if (error.status === 503) {
+        // A missing face model disables only the overlay it powers; plate
+        // tracking keeps working, so the session stays up one mode lower.
+        const fallback = FACE_MODE_FALLBACK[mode] ?? "off";
+        faceModeSelect.value = fallback;
+        setStatus(FACE_MODEL_MISSING[fallback], "error");
+      }
+      // One dropped tick is left alone; the boxes stay put until the next frame.
+    }
+  }
+
+  if (capturing) {
+    faceTimer = setTimeout(faceLoop, faceLoopIntervalMs(mode));
   }
 }
 
