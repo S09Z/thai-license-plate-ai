@@ -27,6 +27,12 @@ async def detect_faces_route(
         description="Also report the jaw contour and a Delaunay triangulation "
         "of all 68 points. Implies landmark fitting.",
     ),
+    fast: bool = Query(
+        False,
+        description="Downscale the frame before inference for a higher frame "
+        "rate, at a small cost to precision. Coordinates are returned in the "
+        "source frame's pixels either way.",
+    ),
 ) -> FaceResponse:
     """Detect human faces in an uploaded image.
 
@@ -38,6 +44,9 @@ async def detect_faces_route(
         mesh: Opt in to the whole-face surface. Separate from ``landmarks``
             because it adds the jaw, and face shape is the most
             identity-bearing part of the 68 points.
+        fast: Opt in to server-side downscaling for a higher achievable frame
+            rate. Used by the realtime camera loop when boxes are all that is
+            wanted.
 
     Returns:
         A :class:`FaceResponse` with the detected faces.
@@ -51,7 +60,11 @@ async def detect_faces_route(
 
     try:
         return detect_faces(
-            data, file.content_type or "", landmarks=landmarks, mesh=mesh
+            data,
+            file.content_type or "",
+            landmarks=landmarks,
+            mesh=mesh,
+            fast=fast,
         )
     except UnsupportedImageTypeError as error:
         raise HTTPException(

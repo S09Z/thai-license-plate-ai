@@ -1,4 +1,4 @@
-.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face fetch-face-model fetch-face-landmark-model clean
+.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face bench-face-fast fetch-face-model fetch-face-landmark-model clean
 
 help:
 	@echo "install         Install dependencies via Poetry"
@@ -15,6 +15,7 @@ help:
 	@echo "bench-recognize Run docs/benchmark/bench_recognize.py"
 	@echo "bench-detect    Run docs/benchmark/bench_detect.py"
 	@echo "bench-face      Run docs/benchmark/bench_face.py"
+	@echo "bench-face-fast Run docs/benchmark/bench_face_fast.py"
 	@echo "fetch-face-model  Download the YuNet ONNX face detection model"
 	@echo "fetch-face-landmark-model  Download the LBF 68-point landmark model"
 	@echo "clean           Remove Python and pytest caches"
@@ -42,8 +43,7 @@ check: test lint format-check typecheck
 run:
 	poetry run uvicorn app.main:app --reload
 
-bench: bench-ocr bench-rag bench-recognize bench-detect bench-face
-
+bench: bench-ocr bench-rag bench-recognize bench-detect bench-face bench-face-fast
 bench-ocr:
 	poetry run python docs/benchmark/bench_ocr.py
 
@@ -58,6 +58,9 @@ bench-detect:
 
 bench-face:
 	poetry run python docs/benchmark/bench_face.py
+
+bench-face-fast:
+	poetry run python docs/benchmark/bench_face_fast.py
 
 # The model is gitignored (*.onnx), so a fresh clone fetches it here.
 fetch-face-model:
