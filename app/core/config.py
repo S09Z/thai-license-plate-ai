@@ -20,6 +20,11 @@ class Settings(BaseSettings):
         face_landmark_model_path: Path to the OpenCV LBF 68-point model.
         face_fast_max_size: Longest-edge cap for the fast face-detection path;
             larger inputs are downscaled server-side before inference.
+        face_gender_model_path: Path to the Levi-Hassner Caffe gender weights.
+        face_gender_proto_path: Path to the gender network's Caffe prototxt.
+        face_expression_model_path: Path to the ONNX facial-expression model.
+        face_attribute_min_confidence: Score below which an inferred expression
+            or apparent gender is reported as ``None`` rather than guessed.
         max_upload_bytes: Largest accepted image upload, in bytes.
         allowed_image_types: Content types accepted by image endpoints.
         ocr_lang: PaddleOCR language code used for recognition.
@@ -49,6 +54,10 @@ class Settings(BaseSettings):
     # Roughly a third of a 720p edge. At this size YuNet costs a few ms rather
     # than ~17 ms, which is what lets the realtime loop run at camera cadence.
     face_fast_max_size: int = 480
+    face_gender_model_path: str = "models/face/gender_net.caffemodel"
+    face_gender_proto_path: str = "models/face/gender_deploy.prototxt"
+    face_expression_model_path: str = "models/face/expression.onnx"
+    face_attribute_min_confidence: float = 0.5
     max_upload_bytes: int = 10 * 1024 * 1024
     allowed_image_types: tuple[str, ...] = ("image/jpeg", "image/png")
 

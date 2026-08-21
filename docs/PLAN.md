@@ -39,6 +39,7 @@ Reuse the established patterns: `create_app()` factory (`app/main.py`), `APIRout
 | 11 ✅ | Facial landmarks | `face/landmarks.py`, `app/schemas/face.py`, `web/static/` | — (opencv contrib's Facemark LBF) | done — `?landmarks=true` fits eyebrows/eyes/nose/mouth; **1.1ms per face vs <25ms budget — met (see Part K)** |
 | 12 ✅ | Whole-face mesh | `face/landmarks.py`, `web/static/` | — (opencv's `cv2.Subdiv2D`) | done — `?mesh=true` adds the jaw and a Delaunay wireframe over all 68 points; **0.4ms on top of the fit, 20.1ms serial vs <25ms — met (see Part L)** |
 | 13 ✅ | Fast realtime face boxes | `app/api/face.py`, `app/services/face_service.py`, `web/static/` | — | done — `?fast=true` downsizes server-side before YuNet (720p 18.5ms → 480px 3.2ms, **5.7×**); the camera loop runs plain face boxes at a 16ms (~60fps target) cadence on their own overlay, decoupled from the 200ms plate loop (see Part M) |
+| 14 ✅ | Face attributes (expression + apparent gender) | `face/attributes.py`, `app/services/face_service.py`, `web/static/` | — (opencv's `cv2.dnn`) | done — `?attributes=true` labels each face via Levi-Hassner gender (Caffe) + OpenCV Zoo expression (ONNX); infer-render-discard, weights hash-pinned in the Makefile; **~18.6ms/face inference vs <25ms — met, but off the fast path (see Part N)** |
 
 Cross-cutting (fold in as stages land, not upfront): model registry under `models/` with
 version/dataset/metrics/git-commit (CLAUDE.md Model Rules) — **still deferred**, though detector
@@ -1063,3 +1064,121 @@ Reproducible with `make bench-face-fast`.
 4. **Frontend verified by static review only.** The split of drawing and the 16 ms cadence were not
    observed in a browser; the JS is syntax-checked and the control flow reviewed, but live-box
    behaviour is unverified, consistent with the project's no-JS-test-infra stance.
+
+## Part N — Face Attributes: Expression + Apparent Gender (✅ shipped 2026-08-10)
+
+Phases 10–12 report only *where* a face's features sit. This phase widens the face pipeline to
+infer *something about the person* — an expression and an apparent gender per box — behind a new
+`?attributes=true` flag and an "Expression & gender" camera mode. The pattern is deliberately
+**infer, render, discard**: nothing is stored, no frame persisted, and the result is never linked to
+a plate number. The two pipelines share a frame, not an output.
+
+**Naming is a decision, not a detail.** The response says `expression` (not "emotion" — a face does
+not reliably reveal an internal state; Barrett et al., 2019) and `apparent_gender` (a
+visual-presentation classifier over two labels, not a determination of sex). Both are carried on a
+new `FaceAttributesModel`, separate from `BoundingBox`, so face concepts never leak into `/detect`.
+
+### Decisions
+
+- **Two `cv2.dnn` nets, no new dependency.** Levi-Hassner gender (Caffe, 227² BGR, fixed mean,
+  softmax head → 2 classes) and OpenCV Zoo's MobileFaceNet expression (ONNX, 112² eye-aligned,
+  RGB → 7 FER labels). `cv2.dnn` already ships with the contrib OpenCV the LBF landmarker needs.
+- **Attributes imply fitting — for the eyes only.** Expression alignment warps the face onto the
+  ArcFace two-eye template, so `?attributes=true` runs the landmarker to get eye centers even when
+  landmark *geometry* isn't requested (`landmarks` stays `null` in that response). Gender needs only
+  the box, so it still runs when a fit doesn't converge; expression abstains on that face.
+- **Each label is independently gated, but the score is always reported.** Below
+  `APP_FACE_ATTRIBUTE_MIN_CONFIDENCE` (0.5) the label is `null` while the winning score stays
+  visible, so a near-call is never silently hidden or rounded into a guess.
+- **Weights are hash-pinned, not trusted blindly.** `make fetch-face-attribute-models` downloads
+  each file and checks it against a SHA-256 pinned in the Makefile; a changed or tampered mirror
+  fails the target loudly. The gender caffemodel's hash was verified **identical across three
+  independent mirrors including Gil Levi's original repo**; the expression ONNX URL is pinned to an
+  `opencv_zoo` commit and its hash reproduced from that commit. `*.caffemodel` and
+  `models/face/*.prototxt` were added to `.gitignore` (the 45 MB caffemodel must never be committed).
+- **The UI degrades one step, with its own message.** A 503 in attributes mode steps down to plain
+  `features` (a missing gender/expression model is the likely cause, and features still work) and
+  shows a message naming `make fetch-face-attribute-models` — not the landmark-model wording the
+  other modes borrow. If the landmark model is the one missing, the next tick steps features → boxes,
+  so the chain self-heals. Labels are English tokens drawn on the canvas; Thai plate glyphs are still
+  kept off it, as before.
+
+### Trust / verification
+
+- Both real nets load under the project's cv2 4.10 and produce the expected shapes — gender `(1, 2)`
+  summing to 1.0 (softmax head), expression `(1, 7)`. (Note: bare-Python cv2 **5.0** *removed*
+  `readNetFromCaffe`; the project runs on contrib 4.10, where it exists.)
+- The real inference path — configured reader → `cv2.dnn` forward → softmax → threshold — was
+  exercised end-to-end through the service on a neutral crop (not mocked); it returns a structured,
+  thresholded `FaceAttributes`. Full gate green: 153 tests, ruff, black, mypy.
+
+### Deliberately not built
+
+- **No age.** The Levi-Hassner release also ships an age net; it was left out to keep the slice to
+  what was asked and avoid a second research-licensed model.
+- **No fast (downscaled) attributes path.** The gender CaffeNet dominates cost (~18.6 ms/face), so
+  attributes stay on the 200 ms cadence rather than the 16 ms fast-box path.
+- **No plate linkage.** By design — the whole point is that this output touches nothing else.
+
+### ⚠️ Known gaps
+
+1. **No real face photograph exercised live here.** The real weights were run through the full code
+   path on a neutral crop, but no actual face was detected-then-labelled in this session; a live
+   check needs the camera UI (`make run` → camera → "Expression & gender").
+2. **Accuracy is entirely unmeasured** — no labelled face set, no confusion matrix. The confidence
+   gate is a guess at 0.5.
+3. **Research-use licensing.** The Levi-Hassner Adience weights are licensed for research use; this
+   is noted in the Makefile and must be resolved before any non-research deployment.
+4. **Fairness is unaudited.** A two-label apparent-gender classifier trained on one dataset will have
+   uneven error across faces it under-represents. Shipped as opt-in and label-abstaining, but not
+   evaluated for bias.
+5. **Frontend verified by static review only** — the label plate and camera mode were reviewed and
+   the JS syntax-checked, but not observed in a browser, consistent with the no-JS-test-infra stance.
+
+### Optimization backlog (proposed 2026-08-10 — not committed, decide per item later)
+
+Ideas for improving the **expression** classifier, captured for future consideration. None are
+scheduled; each is a separate go/no-go. Ordered by impact ÷ effort. Constraints assumed: `cv2.dnn`
+only, no `torch`, camera-only, infer/render/discard, no plate linkage.
+
+**Scope caveat first.** This detects **facial expression** (7 FER labels), *not* depression or any
+mood/clinical condition. Inferring depression from a face is scientifically unreliable and ethically
+fraught — it stays permanently out of scope; no code here should ever label a person that way.
+
+**Tier 1 — cheap, high value (no new deps)**
+
+1. **Measure before optimizing.** No accuracy number exists today (see Known gap #2). Build a small
+   labelled eval set (~100–200 crops across the 7 classes; FER2013 test or own) and add
+   `docs/benchmark/bench_expression.py` → confusion matrix + per-class accuracy + latency. This is
+   the prerequisite scoreboard that makes every model swap below decidable instead of guesswork.
+2. **Temporal smoothing (camera).** The face loop runs ~200 ms/tick; per-frame predictions flicker.
+   Smooth the last N frames per tracked face (EMA on the probability vector or majority vote).
+   Largest perceived-stability win for near-zero cost.
+3. **Calibration + honest confidence.** FER softmax saturates (see [[expression-model-research]]).
+   Show top-1 vs top-2 margin, or fit one temperature scalar on the eval set; tune
+   `APP_FACE_ATTRIBUTE_MIN_CONFIDENCE` off the eval curve instead of the guessed 0.5.
+
+**Tier 2 — robustness (medium effort)**
+
+4. **Pose / quality gating.** Off-frontal faces break the 2-point alignment. Estimate yaw from
+   landmark symmetry; abstain (`?`) when too rotated or the face is smaller than N px, rather than
+   guessing. Cheap geometry check that removes the worst errors.
+5. **Better alignment.** Add nose/mouth from the existing 68-pt fit → full 5-point ArcFace template
+   → a proper affine, less sensitive to eye-localization noise than the current 2-eye similarity.
+
+**Tier 3 — model swaps (measure the payoff via #1)**
+
+6. **A/B the model.** Wire the already-researched **FER+** (MIT, ~3.7 ms, `cv2.dnn`) behind a config
+   flag and let #1's benchmark pick the winner on our data — don't assume MobileFaceNet is best.
+7. **Small ensemble.** Average MobileFaceNet + FER+ probabilities; often +2–4% for near-zero code,
+   still no new deps. Only if the budget allows two forwards.
+
+**Tier 4 — performance (only if latency bites, after accuracy work)**
+
+8. Batch faces into one `blobFromImage`, use an **int8** ONNX variant, downscale the alignment input.
+   Guided by the benchmark, not assumption.
+
+**Suggested first slice if pursued:** #1 + #2 + #3 as one small phase — low-risk, no new deps, and #1
+unblocks #6/#7. (Geometry-only expression via the mesh polygon was considered and rejected: it
+discards the skin-texture signal a CNN reads and generally *loses* accuracy — see the 2026-08-10
+discussion; only a learned hybrid, not pure geometry, would help.)
