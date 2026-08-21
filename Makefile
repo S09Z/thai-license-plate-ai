@@ -1,4 +1,4 @@
-.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face bench-face-fast fetch-face-model fetch-face-landmark-model clean
+.PHONY: help install test lint format format-check typecheck check run bench bench-ocr bench-rag bench-recognize bench-detect bench-face bench-face-fast fetch-face-model fetch-face-landmark-model fetch-face-attribute-models clean
 
 help:
 	@echo "install         Install dependencies via Poetry"
@@ -18,6 +18,7 @@ help:
 	@echo "bench-face-fast Run docs/benchmark/bench_face_fast.py"
 	@echo "fetch-face-model  Download the YuNet ONNX face detection model"
 	@echo "fetch-face-landmark-model  Download the LBF 68-point landmark model"
+	@echo "fetch-face-attribute-models  Download the gender + expression models (hash-checked)"
 	@echo "clean           Remove Python and pytest caches"
 
 install:
@@ -74,6 +75,28 @@ fetch-face-landmark-model:
 	mkdir -p models/face
 	curl -fsSL -o models/face/lbfmodel.yaml \
 		https://raw.githubusercontent.com/kurnianggoro/GSOC2017/master/data/lbfmodel.yaml
+
+# Apparent-gender (Levi-Hassner Caffe) and expression (OpenCV Zoo ONNX) models.
+# Each download is checked against a SHA-256 pinned below, so a changed or
+# tampered mirror fails the target loudly instead of installing silently. The
+# gender hash was verified identical across three mirrors including the original
+# author's repo; the expression URL is pinned to an opencv_zoo commit. Verified
+# 2026-08-10. Note: the Levi-Hassner weights are licensed for research use.
+GENDER_CAFFEMODEL_SHA = ac7571b281ae078817764b645a20541bd6aa1babeac20a45e6d8de7d61ba0e50
+GENDER_PROTOTXT_SHA   = c1961acc32e6e9ce855f6ec4973e9a939cc2d49089a8aaefeafa0e100fb110cc
+EXPRESSION_ONNX_SHA   = 4f61307602fc089ce20488a31d4e4614e3c9753a7d6c41578c854858b183e1a9
+
+fetch-face-attribute-models:
+	mkdir -p models/face
+	curl -fsSL -o models/face/gender_net.caffemodel \
+		https://github.com/GilLevi/AgeGenderDeepLearning/raw/master/models/gender_net.caffemodel
+	curl -fsSL -o models/face/gender_deploy.prototxt \
+		https://github.com/smahesh29/Gender-and-Age-Detection/raw/master/gender_deploy.prototxt
+	curl -fsSL -o models/face/expression.onnx \
+		https://github.com/opencv/opencv_zoo/raw/3c4f8c9308075d22f148f74b9306f0222a9aeb30/models/facial_expression_recognition/facial_expression_recognition_mobilefacenet_2022july.onnx
+	@echo "$(GENDER_CAFFEMODEL_SHA)  models/face/gender_net.caffemodel" | shasum -a 256 -c -
+	@echo "$(GENDER_PROTOTXT_SHA)  models/face/gender_deploy.prototxt" | shasum -a 256 -c -
+	@echo "$(EXPRESSION_ONNX_SHA)  models/face/expression.onnx" | shasum -a 256 -c -
 
 clean:
 	find . -type d -name "__pycache__" -not -path "./.venv/*" -exec rm -rf {} +

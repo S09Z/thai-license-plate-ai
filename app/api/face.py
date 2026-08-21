@@ -33,6 +33,11 @@ async def detect_faces_route(
         "rate, at a small cost to precision. Coordinates are returned in the "
         "source frame's pixels either way.",
     ),
+    attributes: bool = Query(
+        False,
+        description="Infer each face's expression and apparent gender. "
+        "Implies landmark fitting, which the expression crop is aligned to.",
+    ),
 ) -> FaceResponse:
     """Detect human faces in an uploaded image.
 
@@ -47,6 +52,10 @@ async def detect_faces_route(
         fast: Opt in to server-side downscaling for a higher achievable frame
             rate. Used by the realtime camera loop when boxes are all that is
             wanted.
+        attributes: Opt in to an inferred expression and apparent gender per
+            face. Off by default: it runs two extra models the endpoint
+            otherwise never touches, and describes the person, not just where
+            the face sits.
 
     Returns:
         A :class:`FaceResponse` with the detected faces.
@@ -65,6 +74,7 @@ async def detect_faces_route(
             landmarks=landmarks,
             mesh=mesh,
             fast=fast,
+            attributes=attributes,
         )
     except UnsupportedImageTypeError as error:
         raise HTTPException(

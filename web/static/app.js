@@ -52,7 +52,16 @@ const MESH_COLOUR = "#00e5ff";
 // A face 503 steps the control down one level rather than off, because the
 // server cannot say which of the two models is missing; the next tick settles
 // it. Falling straight to "off" would hide working face boxes.
-const FACE_MODE_FALLBACK = { mesh: "features", features: "boxes", boxes: "off" };
+const FACE_MODE_FALLBACK = {
+  mesh: "features",
+  // Attributes step down to plain features rather than off: a 503 there usually
+  // means an expression/gender model is missing, not the landmark model, and
+  // features still work on their own. If the landmark model is the one missing,
+  // the next tick fails again and steps features -> boxes, so it self-heals.
+  attributes: "features",
+  features: "boxes",
+  boxes: "off",
+};
 const CAPTURE_INTERVAL_MS = 1500;
 // Detection alone is ~25ms (docs/benchmark/detect-v0.1.md), so boxes can be
 // refreshed far more often than the ~400ms full recognize pipeline allows.
@@ -83,6 +92,13 @@ const FACE_MODEL_MISSING = {
     "Face detection model is not installed, so face overlays are unavailable. " +
     "Fetch it with `make fetch-face-model` to enable them.",
 };
+
+// Attributes lean on two extra models the other modes never touch, so a 503
+// there gets its own message rather than borrowing a landmark-model one.
+const FACE_ATTRIBUTES_MISSING =
+  "An expression or gender model is not installed, so those labels are " +
+  "unavailable. Showing facial features only; fetch them with " +
+  "`make fetch-face-attribute-models`.";
 
 let loadedImage = null;
 let objectUrl = null;
@@ -269,19 +285,23 @@ async function detectOnly(file) {
  * @param {boolean} landmarks Whether to ask for feature points as well.
  * @param {boolean} mesh Whether to ask for the whole-face triangulation.
  * @param {boolean} fast Whether to ask the server to downscale for speed.
+ * @param {boolean} attributes Whether to ask for expression and gender.
  */
-async function detectFaces(file, landmarks, mesh, fast) {
+async function detectFaces(file, landmarks, mesh, fast, attributes) {
   const body = new FormData();
   body.append("file", file);
 
-  // `mesh` already implies fitting server-side, so it wins outright rather
-  // than being combined with `landmarks`. `fast` is the boxes-only path: the
-  // only time a client wants the downscale trade is when it only needs a box.
+  // Each mode maps to exactly one flag: `mesh` and `attributes` both imply
+  // fitting server-side, so they win outright rather than being combined with
+  // `landmarks`. `fast` is the boxes-only path: the only time a client wants
+  // the downscale trade is when it only needs a box.
   let url = "/detect/faces";
   if (mesh) {
     url = "/detect/faces?mesh=true";
   } else if (landmarks) {
     url = "/detect/faces?landmarks=true";
+  } else if (attributes) {
+    url = "/detect/faces?attributes=true";
   } else if (fast) {
     url = "/detect/faces?fast=true";
   }
@@ -497,6 +517,46 @@ function drawFaces(faces) {
       drawLandmarks(context, landmarks);
     }
   });
+
+  // Labels last, so their backing plate sits over the box and any landmarks
+  // rather than under them. These are English tokens ("female", "happy"), not
+  // recognized plate text, so drawing them on the canvas is safe — unlike the
+  // Thai plate glyphs the results table keeps out of the canvas on purpose.
+  faces.forEach(({ box, attributes }) => {
+    if (attributes) {
+      drawAttributeLabel(context, box, attributes);
+    }
+  });
+}
+
+/** Compose one face's attributes into a short label, abstentions as "?". */
+function formatAttributes(attributes) {
+  const gender = attributes.apparent_gender ?? "?";
+  const expression = attributes.expression ?? "?";
+  return `${gender} · ${expression}`;
+}
+
+/** Draw an attribute label on a dark plate just above the face box.
+ *
+ * Runs after the face overlay's own clearRect() (in drawFaces), so it never
+ * clears the box and landmarks it is meant to sit on top of.
+ */
+function drawAttributeLabel(context, box, attributes) {
+  const text = formatAttributes(attributes);
+  const fontSize = Math.max(14, faceOverlay.width / 45);
+  context.font = `${fontSize}px sans-serif`;
+  context.textBaseline = "bottom";
+
+  const padding = Math.round(fontSize * 0.3);
+  const plateWidth = context.measureText(text).width + padding * 2;
+  const plateHeight = fontSize + padding * 2;
+  // Sit the plate just above the box, but never let it clip off the top edge.
+  const bottom = Math.max(box.y1, plateHeight);
+
+  context.fillStyle = "rgba(0, 0, 0, 0.6)";
+  context.fillRect(box.x1, bottom - plateHeight, plateWidth, plateHeight);
+  context.fillStyle = FACE_BOX_COLOUR;
+  context.fillText(text, box.x1 + padding, bottom - padding);
 }
 
 /** Stroke one run of landmark points as a single path.
@@ -607,6 +667,7 @@ async function faceLoop() {
         mode === "features",
         mode === "mesh",
         mode === "boxes",
+        mode === "attributes",
       );
       drawFaces(result.faces);
     } catch (error) {
@@ -615,7 +676,13 @@ async function faceLoop() {
         // tracking keeps working, so the session stays up one mode lower.
         const fallback = FACE_MODE_FALLBACK[mode] ?? "off";
         faceModeSelect.value = fallback;
-        setStatus(FACE_MODEL_MISSING[fallback], "error");
+        // Attributes need their own two models, which the generic per-mode
+        // messages do not name; step down but say what to fetch.
+        const message =
+          mode === "attributes"
+            ? FACE_ATTRIBUTES_MISSING
+            : FACE_MODEL_MISSING[fallback];
+        setStatus(message, "error");
       }
       // One dropped tick is left alone; the boxes stay put until the next frame.
     }

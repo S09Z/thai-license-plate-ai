@@ -15,8 +15,13 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.core.config import get_settings
-from app.services.face_service import get_face_detector, get_face_landmarker
+from app.services.face_service import (
+    get_face_attribute_reader,
+    get_face_detector,
+    get_face_landmarker,
+)
 from detector.detector import Detection
+from face.attributes import FaceAttributeReader, FaceAttributes
 from face.detector import FaceDetector
 from face.landmarks import FaceLandmarker, FacialLandmarks
 
@@ -34,10 +39,12 @@ def reset_singletons() -> Iterator[None]:
     get_settings.cache_clear()
     get_face_detector.cache_clear()
     get_face_landmarker.cache_clear()
+    get_face_attribute_reader.cache_clear()
     yield
     get_settings.cache_clear()
     get_face_detector.cache_clear()
     get_face_landmarker.cache_clear()
+    get_face_attribute_reader.cache_clear()
 
 
 @pytest.fixture
@@ -101,6 +108,7 @@ def test_detect_faces_returns_boxes_for_valid_png(
             {
                 "box": {"x1": 3, "y1": 4, "x2": 13, "y2": 16, "confidence": 0.88},
                 "landmarks": None,
+                "attributes": None,
             }
         ],
     }
@@ -272,6 +280,101 @@ def test_openapi_exposes_the_fast_parameter(client: TestClient) -> None:
     }
 
     assert "fast" in params
+
+
+def test_openapi_exposes_the_attributes_parameter(client: TestClient) -> None:
+    """The schema advertises ``attributes`` so clients can discover it."""
+    schema = client.get("/openapi.json").json()
+    params = {
+        param["name"]
+        for param in schema["paths"]["/detect/faces"]["post"]["parameters"]
+    }
+
+    assert "attributes" in params
+
+
+def test_detect_faces_reports_attributes_when_asked(
+    client: TestClient,
+    stub_faces: list[Detection],
+    stub_landmarks: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``?attributes=true`` adds an expression and apparent gender per face.
+
+    Landmarks are fit only to locate the eyes for alignment, so they are not
+    reported unless asked for separately: ``landmarks`` stays null here.
+    """
+
+    def _fake_read(
+        self: FaceAttributeReader, image: np.ndarray, boxes: list, eye_centers: list
+    ) -> list[FaceAttributes]:
+        return [
+            FaceAttributes(
+                expression="happy",
+                expression_confidence=0.97,
+                apparent_gender="female",
+                apparent_gender_confidence=0.91,
+            )
+            for _ in boxes
+        ]
+
+    monkeypatch.setattr(FaceAttributeReader, "read", _fake_read)
+
+    response = client.post(
+        "/detect/faces?attributes=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 200
+    (face,) = response.json()["faces"]
+    assert face["landmarks"] is None
+    assert face["attributes"] == {
+        "expression": "happy",
+        "expression_confidence": 0.97,
+        "apparent_gender": "female",
+        "apparent_gender_confidence": 0.91,
+    }
+
+
+def test_detect_faces_attributes_need_the_landmark_model(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_faces: list[Detection],
+) -> None:
+    """Attributes imply fitting, so a missing LBF model 503s, not 500s."""
+    monkeypatch.setenv("APP_FACE_LANDMARK_MODEL_PATH", str(tmp_path / "absent.yaml"))
+    get_settings.cache_clear()
+    get_face_landmarker.cache_clear()
+
+    response = client.post(
+        "/detect/faces?attributes=true",
+        files={"file": ("scene.png", _png_bytes(), "image/png")},
+    )
+
+    assert response.status_code == 503
+
+
+def test_detect_faces_ignores_attribute_models_by_default(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    stub_faces: list[Detection],
+) -> None:
+    """Without the opt-in, missing attribute models change nothing."""
+    monkeypatch.setenv(
+        "APP_FACE_GENDER_MODEL_PATH", str(tmp_path / "absent.caffemodel")
+    )
+    monkeypatch.setenv("APP_FACE_EXPRESSION_MODEL_PATH", str(tmp_path / "absent.onnx"))
+    get_settings.cache_clear()
+    get_face_attribute_reader.cache_clear()
+
+    response = client.post(
+        "/detect/faces", files={"file": ("scene.png", _png_bytes(), "image/png")}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["faces"][0]["attributes"] is None
 
 
 def test_detect_faces_ignores_the_landmark_model_by_default(
