@@ -1,6 +1,6 @@
 """Full plate recognition API route."""
 
-from fastapi import APIRouter, HTTPException, UploadFile, status
+from fastapi import APIRouter, HTTPException, Query, UploadFile, status
 
 from app.schemas.recognize import RecognizeResponse
 from app.services.recognize_service import recognize_plates
@@ -14,7 +14,14 @@ router = APIRouter(tags=["recognize"])
 
 
 @router.post("/recognize", response_model=RecognizeResponse)
-async def recognize(file: UploadFile) -> RecognizeResponse:
+async def recognize(
+    file: UploadFile,
+    include_crops: bool = Query(
+        False,
+        description="Attach each plate's perspective-corrected crop as a "
+        "base64 PNG, so a client can show what the OCR read.",
+    ),
+) -> RecognizeResponse:
     """Detect, read and validate every license plate in an uploaded scene.
 
     Runs the whole pipeline: detection, perspective correction, OCR,
@@ -23,6 +30,8 @@ async def recognize(file: UploadFile) -> RecognizeResponse:
 
     Args:
         file: The uploaded scene image (JPEG or PNG).
+        include_crops: When true, attach each plate's rectified crop as a
+            base64 PNG. The upload UI sets this; the live camera loop does not.
 
     Returns:
         A :class:`RecognizeResponse` with one entry per recognized plate.
@@ -35,7 +44,7 @@ async def recognize(file: UploadFile) -> RecognizeResponse:
     data = await file.read()
 
     try:
-        return recognize_plates(data, file.content_type or "")
+        return recognize_plates(data, file.content_type or "", include_crops)
     except UnsupportedImageTypeError as error:
         raise HTTPException(
             status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail=str(error)
